@@ -13,7 +13,7 @@ uv sync
 
 
 # add www-data to the group that owns the socket for nginx:
-# sudo usermod -aG splinkapiadm www-data
-cd /home/suseel/ndap_data_validator
+sudo usermod -aG suseel www-data
+# cd /home/suseel/ndap_data_validator
 
-uv run uvicorn main:app
+# uv run uvicorn main:app

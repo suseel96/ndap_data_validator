@@ -48,4 +48,4 @@ jobs:
             git clean -fd
             echo "${{ secrets.ENV }}" > "/home/suseel/ndap_data_validator/.env"
             sh .github/workflows/install.sh
-            # sh .github/workflows/deploy.sh 
+            sh .github/workflows/deploy.sh 
