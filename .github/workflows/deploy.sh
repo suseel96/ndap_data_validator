@@ -1,0 +1,3 @@
+sudo systemctl daemon-reload
+sudo systemctl restart ndap_data_validator.service
+sudo systemctl enable ndap_data_validator.service
