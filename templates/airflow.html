@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="card">
+    <div class="card-body p-2">
+      {% if not airflow_url %}
+        <div class="alert alert-warning mb-0">
+          Airflow URL is not configured. Set environment variable <code>NDAP_AIRFLOW_URL</code> or pass <code>?url=...</code> in the address bar.
+        </div>
+      {% else %}
+        <div class="ratio ratio-16x9" style="min-height: 75vh;">
+          <iframe src="{{ airflow_url }}" title="Airflow" style="border:0; width:100%; height:100%;" allowfullscreen></iframe>
+        </div>
+        <div class="text-muted small mt-2">
+          Note: Embedding depends on the Airflow server allowing iframes (X-Frame-Options / Content-Security-Policy).
+        </div>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}
+

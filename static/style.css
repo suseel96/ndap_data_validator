@@ -1,0 +1,105 @@
+/* Blue-White theme variables */
+:root {
+  --brand-primary: #0d6efd; /* Bootstrap primary */
+  --brand-primary-600: #0b5ed7;
+  --brand-bg: #f5f9ff;      /* subtle blue background */
+  --brand-surface: #ffffff; /* cards/content */
+  --brand-border: #dbe7ff;  /* light blue border */
+}
+
+/* Layout */
+html, body { background: var(--brand-bg); }
+.app-shell { min-height: calc(100vh - 56px); }
+.app-header { background: linear-gradient(0deg, #ffffff, #f8fbff); }
+.app-header h5 { color: var(--brand-primary); font-weight: 700; }
+.brand-title { font-size: 1.25rem; letter-spacing: .3px; color: #0a58ca; text-transform: uppercase; }
+
+/* Page headers and cards */
+.page-header { border-bottom: 1px solid var(--brand-border); padding-bottom: 6px; }
+.card-narrow { max-width: 720px; }
+.card-auth { max-width: 420px; margin-left: auto; margin-right: auto; }
+.page-centered { max-width: 960px; margin-left: auto; margin-right: auto; }
+
+/* Sidebar stepper */
+.stepper .step {
+  position: relative;
+  padding: 12px 8px 12px 28px;
+  border-left: 3px solid var(--brand-border);
+  background: transparent;
+  transition: background .15s ease, border-color .15s ease;
+}
+.stepper .step + .step { margin-top: 8px; }
+.stepper .step:hover { background: #eef5ff; }
+.stepper .step.active { border-left-color: var(--brand-primary); background: #e9f2ff; }
+.stepper .step::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 14px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--brand-border);
+}
+.stepper .step.active::before { background: var(--brand-primary); }
+.step-title { font-weight: 600; font-size: 0.95rem; color: #0b1f44; }
+
+/* Horizontal stepper overrides */
+.stepper-horizontal { border-bottom: 1px solid var(--brand-border); padding-bottom: 8px; }
+.stepper-horizontal .step { border-left: none; padding: 8px 12px 8px 12px; background: transparent; position: relative; }
+.stepper-horizontal .step + .step { margin-top: 0; }
+.stepper-horizontal .step::before { display: none; }
+.stepper-horizontal .step .step-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--brand-border);
+  color: #0b1f44;
+  font-weight: 700;
+  margin-right: 8px;
+}
+.stepper-horizontal .step.active .step-icon { background: var(--brand-primary); color: #fff; }
+.stepper-horizontal .step .step-title { display: inline-block; vertical-align: middle; }
+
+/* Connector lines between steps */
+.stepper-horizontal .step::after {
+  content: "";
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 2px;
+  background: var(--brand-border);
+}
+.stepper-horizontal .step:last-child::after { display: none; }
+
+/* Clickable links styling */
+.step-link { text-decoration: none; color: inherit; display: inline-flex; align-items: center; }
+.step-link:hover .step-title { text-decoration: underline; }
+.step-link.disabled { color: #6c757d; cursor: not-allowed; }
+.step.disabled .step-icon { background: #e9ecef; color: #6c757d; }
+.step.completed .step-icon { background: #28a745; color: #fff; }
+.step.completed .step-title { color: #28a745; font-weight: 600; }
+
+/* Buttons - strengthen primary */
+.btn-primary { background-color: var(--brand-primary) !important; border-color: var(--brand-primary) !important; }
+.btn-primary:hover { background-color: var(--brand-primary-600) !important; border-color: var(--brand-primary-600) !important; }
+
+/* Cards and tables */
+.card { border-color: var(--brand-border); box-shadow: 0 1px 2px rgba(13,110,253,0.04); }
+table thead th { background: #f0f6ff; color: #0b1f44; border-bottom-color: var(--brand-border) !important; }
+table tbody tr.table-danger td { background-color: #ffeef0 !important; }
+
+/* Tables responsive */
+.table { margin-bottom: 0; }
+.card .table { margin-bottom: 0; }
+.table-wrap { overflow-x: auto; }
+
+/* Forms */
+.form-control, .form-select { border-color: var(--brand-border); }
+.form-control:focus, .form-select:focus { border-color: var(--brand-primary); box-shadow: 0 0 0 .2rem rgba(13,110,253,.15); }
+

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <h4 class="mb-3">Step 4: Upload to AWS S3</h4>
+  <form method="post" action="/upload" class="mt-3">
+    <input type="hidden" name="token" value="{{ token }}" />
+    <input type="hidden" name="columns" value="{{ '|||' . join(columns) }}" />
+    <input type="hidden" name="time_date_only" value="{% if time_date_only %}on{% endif %}" />
+
+    {% for col in columns %}
+      <input type="hidden" name="role_{{ col }}" value="{{ role_selection[col] }}" />
+    {% endfor %}
+
+    <div class="row g-3">
+      <div class="col-md-6">
+        <label class="form-label">S3 bucket</label>
+        <input class="form-control" type="text" name="bucket" required />
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Object key name</label>
+        <input class="form-control" type="text" name="object_key_name" required />
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Key prefix (optional)</label>
+        <input class="form-control" type="text" name="prefix" />
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Credentials mode</label>
+        <select class="form-select" name="creds_mode">
+          <option>Use environment</option>
+          <option>Enter manually</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row g-3 mt-1">
+      <div class="col-md-4">
+        <label class="form-label">AWS Access Key ID</label>
+        <input class="form-control" type="text" name="access_key" />
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">AWS Secret Access Key</label>
+        <input class="form-control" type="password" name="secret_key" />
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">AWS Region</label>
+        <input class="form-control" type="text" name="region_name" value="us-east-1" />
+      </div>
+    </div>
+
+    <div class="form-check form-switch mt-3">
+      <input class="form-check-input" type="checkbox" name="upload_cleaned" id="upload_cleaned" checked>
+      <label class="form-check-label" for="upload_cleaned">Upload cleaned CSV (else original)</label>
+    </div>
+
+    <button class="btn btn-primary mt-3" type="submit">Upload to S3</button>
+  </form>
+{% endblock %}
+
+
+
+

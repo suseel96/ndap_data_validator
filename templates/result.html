@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <h4 class="mb-3">Step 4: Upload to AWS S3</h4>
+  {% if success %}
+    <div class="alert alert-success">Uploaded successfully to <code>{{ s3_uri }}</code></div>
+    <a href="/" class="btn btn-outline-primary">Start over</a>
+  {% else %}
+    <div class="alert alert-danger">Upload failed: {{ error }}</div>
+    {% if trace %}<pre class="small">{{ trace }}</pre>{% endif %}
+    <a href="/" class="btn btn-outline-secondary">Go back</a>
+  {% endif %}
+{% endblock %}
+
+
+

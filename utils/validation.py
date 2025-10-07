@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Dict, List, Tuple, Optional
+import json
+import os
 
 import pandas as pd
 
@@ -36,6 +38,11 @@ def _coerce_to_string(series: pd.Series) -> Tuple[pd.Series, int]:
 
 def _coerce_to_integer(series: pd.Series) -> Tuple[pd.Series, int]:
     numeric = pd.to_numeric(series, errors="coerce")
+    # Count values that are fractional (e.g., 1.2) as conversion errors for integer type
+    fractionals = numeric.notna() & (numeric % 1 != 0)
+    # Set fractional values to NA so they appear as errors in the cleaned data
+    if fractionals.any():
+        numeric = numeric.mask(fractionals, other=pd.NA)
     errors = int(numeric.isna().sum()) - int(series.isna().sum())
     # Use pandas nullable integer dtype so NaNs are supported
     converted = numeric.astype("Int64")
@@ -179,13 +186,25 @@ def coerce_dataframe_by_roles(
     return coerced_df, report
 
 
+def _load_rules() -> Dict[str, object]:
+    path = os.path.join(os.path.dirname(__file__), "validation_rules.json")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def validate_dataframe_by_roles(
     df: pd.DataFrame,
     role_selection: Dict[str, str],
     coercion_report: Dict[str, Dict[str, int]],
+    schema_name: str | None = None,
 ) -> Dict[str, object]:
     per_column: Dict[str, Dict[str, object]] = {}
     failed_columns: List[str] = []
+
+    rules = _load_rules()
+    schemas = rules.get("schemas", {}) if isinstance(rules, dict) else {}
+    schema_key = schema_name or rules.get("defaultSchema") or "National"
+    schema = schemas.get(schema_key, {}) if isinstance(schemas, dict) else {}
 
     for col in df.columns:
         role = role_selection.get(col, "Others")
@@ -194,19 +213,21 @@ def validate_dataframe_by_roles(
         passed = True
         reasons: List[str] = []
 
-        if role in ("Location", "Time"):
-            if nulls > 0:
-                passed = False
-                reasons.append("No Null required")
-        elif role == "Measures":
-            # Numeric only and no nulls
-            if nulls > 0:
-                passed = False
-                reasons.append("Measures must be non-null")
-            if conv_errs > 0:
-                passed = False
-                reasons.append("Non-numeric values detected")
-        # Others: no strict constraints
+        # Apply rule for this role, with special case: Global schema makes Location optional
+        role_rule = schema.get(role, {}) if isinstance(schema, dict) else {}
+        not_null_req = bool(role_rule.get("notNull", False))
+        mandatory = bool(role_rule.get("mandatory", False))
+        numeric_only = bool(role_rule.get("numericOnly", False))
+
+        # If schema is Global and role is Location, it's optional; if column not present then skip.
+        # We are iterating only present columns; to enforce mandatory columns we would check later at summary level.
+
+        if numeric_only and conv_errs > 0:
+            passed = False
+            reasons.append("Non-numeric values detected")
+        if not_null_req and nulls > 0:
+            passed = False
+            reasons.append("No Null required")
 
         if not passed:
             failed_columns.append(col)
@@ -219,10 +240,23 @@ def validate_dataframe_by_roles(
             "reasons": reasons,
         }
 
+    # Enforce mandatory roles: if any required role has zero assigned columns, mark failure
+    assigned_by_role: Dict[str, int] = {r: 0 for r in ["Location", "Time", "Measures", "Others"]}
+    for c, r in role_selection.items():
+        assigned_by_role[r] = assigned_by_role.get(r, 0) + 1
+    schema_mandatory_roles = [k for k, v in schema.items() if isinstance(v, dict) and v.get("mandatory")]
+    # Always require at least one Time and one Measures column for all schemas
+    for hard_required in ("Time", "Measures"):
+        if hard_required not in schema_mandatory_roles:
+            schema_mandatory_roles.append(hard_required)
+    missing_roles = [r for r in schema_mandatory_roles if assigned_by_role.get(r, 0) == 0]
+    overall_passed = len(failed_columns) == 0 and len(missing_roles) == 0
+
     return {
         "per_column": per_column,
         "failed_columns": failed_columns,
-        "passed": len(failed_columns) == 0,
+        "missing_roles": missing_roles,
+        "passed": overall_passed,
     }
 
 
