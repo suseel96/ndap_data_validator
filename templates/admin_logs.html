@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <h4 class="mb-3">Admin: Logs</h4>
+
+  <form class="row g-3 align-items-end mb-3" method="get" action="/admin/logs">
+    <div class="col-md-4">
+      <label class="form-label">Filter by user</label>
+      <input class="form-control" type="text" name="username" value="{{ filter_username | default('') }}" placeholder="Leave blank for all users" />
+    </div>
+    <div class="col-md-2">
+      <button class="btn btn-primary" type="submit">Apply</button>
+    </div>
+  </form>
+
+  <div class="row g-4">
+    <div class="col-md-6">
+      <div class="card p-3">
+        <h6>Validation logs</h6>
+        <table class="table table-sm table-striped mt-2">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>User</th>
+              <th>Passed</th>
+              <th>Failed columns</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in validation_logs %}
+              <tr>
+                <td>{{ r.created_at }}</td>
+                <td>{{ r.username }}</td>
+                <td>{{ 'Yes' if r.passed else 'No' }}</td>
+                <td>{{ r.failed_columns }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <div class="card p-3">
+        <h6>Upload logs</h6>
+        <table class="table table-sm table-striped mt-2">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>User</th>
+              <th>Token</th>
+              <th>Bucket</th>
+              <th>Key</th>
+              <th>Cleaned</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in upload_logs %}
+              <tr>
+                <td>{{ r.created_at }}</td>
+                <td>{{ r.username }}</td>
+                <td><code>{{ r.token }}</code></td>
+                <td>{{ r.bucket }}</td>
+                <td><code>{{ r.object_key }}</code></td>
+                <td>{{ 'Yes' if r.cleaned else 'No' }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
+
+
+

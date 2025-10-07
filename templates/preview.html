@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <style>
+    table { font-size: 0.9rem; }
+    .dnd-board { display: grid; grid-template-columns: 1fr; gap: 16px; }
+    .dnd-columns { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    .bucket { background: #fff; border: 2px dashed var(--brand-border); border-radius: .5rem; min-height: 160px; padding: 12px; }
+    .bucket-header { font-weight: 700; color: #0b1f44; margin-bottom: 8px; }
+    .pill { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 6px 26px 6px 10px; background: #f0f6ff; border: 1px solid var(--brand-border); border-radius: 999px; margin: 6px; cursor: grab; user-select: none; }
+    .pill.dragging { opacity: 0.6; }
+    .pill.selected { background: #dceaff; border-color: #a7c4ff; box-shadow: 0 0 0 .18rem rgba(13,110,253,.15); }
+    .bucket.drag-over { background: #e9f2ff; }
+    .pill-close { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 1px solid var(--brand-border); color: #495057; font-weight: 700; line-height: 16px; text-align: center; cursor: pointer; }
+    .pill-close:hover { background: #ffecec; border-color: #ffb3b3; color: #c1121f; }
+    #allCols .pill .pill-close { display: none; }
+  </style>
+
+  <h4 class="mb-3">Step 2: Select column types</h4>
+  <div class="mb-3">
+    {{ preview_html | safe }}
+  </div>
+
+  <form id="roleForm" method="post" action="/validate" data-schema="{{ schema or 'National' }}">
+    <input type="hidden" name="token" value="{{ token }}" />
+    <input type="hidden" name="columns" value="{{ '|||' . join(columns) }}" />
+
+    <div class="form-check form-switch mb-3">
+      <input class="form-check-input" type="checkbox" name="time_date_only" id="time_date_only">
+      <label class="form-check-label" for="time_date_only">Treat Time as date only (drop time components)</label>
+    </div>
+
+    <div class="alert alert-info py-2">
+      {% if (schema or 'National') == 'National' %}
+        <strong>Requirement:</strong> For National datasets, at least one Time, Measure, and Location column is required.
+      {% else %}
+        <strong>Requirement:</strong> For Global datasets, at least one Time and one Measure column is required.
+      {% endif %}
+    </div>
+
+    <div class="dnd-board">
+      <div class="bucket" data-role="all">
+        <div class="bucket-header">All columns</div>
+        <div class="bucket-content" id="allCols">
+          {% for col in columns %}
+            <span class="pill" draggable="true" data-col="{{ col }}">{{ col }}<span class="pill-close">×</span></span>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="dnd-columns">
+        <div class="bucket" data-role="Location">
+          <div class="bucket-header">Location</div>
+          <div class="bucket-content" id="bucketLocation"></div>
+        </div>
+        <div class="bucket" data-role="Time">
+          <div class="bucket-header">Time</div>
+          <div class="bucket-content" id="bucketTime"></div>
+        </div>
+        <div class="bucket" data-role="Measures">
+          <div class="bucket-header">Measures</div>
+          <div class="bucket-content" id="bucketMeasures"></div>
+        </div>
+        <div class="bucket" data-role="Others">
+          <div class="bucket-header">Others</div>
+          <div class="bucket-content" id="bucketOthers"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hidden inputs generated dynamically on submit: role_{col} -->
+
+    <span id="runButtonWrapper" class="d-inline-block" tabindex="0" data-bs-toggle="tooltip" data-bs-title="Drag all columns into a category to enable validation">
+      <button id="runButton" class="btn btn-primary mt-3" type="submit" disabled>Run validation</button>
+    </span>
+  </form>
+
+  <script>
+    const buckets = document.querySelectorAll('.bucket');
+    let dragged = null;
+    let currentSelection = new Set();
+    const runButton = document.getElementById('runButton');
+    const runButtonWrapper = document.getElementById('runButtonWrapper');
+    const roleForm = document.getElementById('roleForm');
+
+    function getUnassignedCount() {
+      return document.querySelectorAll('#allCols .pill').length;
+    }
+
+    function updateRunButton() {
+      const remaining = getUnassignedCount();
+      const schema = (roleForm && roleForm.getAttribute('data-schema')) || 'National';
+      const locCount = document.querySelectorAll('#bucketLocation .pill').length;
+      const timeCount = document.querySelectorAll('#bucketTime .pill').length;
+      const measureCount = document.querySelectorAll('#bucketMeasures .pill').length;
+      const requireLocation = schema === 'National';
+      const locationOk = !requireLocation || locCount > 0;
+      const timeOk = timeCount > 0;
+      const measureOk = measureCount > 0;
+      const enabled = (remaining === 0) && locationOk && timeOk && measureOk;
+      if (runButton) {
+        runButton.disabled = !enabled;
+      }
+      if (runButtonWrapper) {
+        let msg;
+        const missingRoles = [];
+        if (!timeOk) missingRoles.push('Time');
+        if (!measureOk) missingRoles.push('Measure');
+        if (!locationOk) missingRoles.push('Location');
+        if (missingRoles.length > 0) {
+          const last = missingRoles.pop();
+          const list = missingRoles.length ? `${missingRoles.join(', ')} and ${last}` : last;
+          msg = `Assign at least one ${list} column`;
+        } else if (remaining > 0) {
+          msg = `Drag all columns into a category to enable validation (${remaining} remaining)`;
+        } else {
+          msg = 'Run validation';
+        }
+        // Update Bootstrap tooltip if available, else fallback to native title
+        if (window.bootstrap && window.bootstrap.Tooltip) {
+          runButtonWrapper.setAttribute('data-bs-title', msg);
+          const existing = window.bootstrap.Tooltip.getInstance(runButtonWrapper);
+          const t = existing || new window.bootstrap.Tooltip(runButtonWrapper);
+          if (t && t.setContent) {
+            t.setContent({ '.tooltip-inner': msg });
+          }
+        } else {
+          runButtonWrapper.setAttribute('title', msg);
+        }
+      }
+    }
+
+    function ensureCloseButtons() {
+      document.querySelectorAll('.pill').forEach(p => {
+        if (!p.querySelector('.pill-close')) {
+          const x = document.createElement('span');
+          x.className = 'pill-close';
+          x.textContent = '×';
+          p.appendChild(x);
+        }
+      });
+    }
+
+    ensureCloseButtons();
+    updateRunButton();
+
+    // Initialize Bootstrap tooltip explicitly if available
+    if (runButtonWrapper && window.bootstrap && window.bootstrap.Tooltip) {
+      new window.bootstrap.Tooltip(runButtonWrapper);
+    }
+
+    document.querySelectorAll('.pill').forEach(pill => {
+      // click to select (multi-select with Ctrl/Cmd or Shift)
+      pill.addEventListener('click', (e) => {
+        if (e.target.closest('.pill-close')) return; // handled separately
+        const multi = e.ctrlKey || e.metaKey || e.shiftKey;
+        if (!multi) {
+          // single select
+          currentSelection.forEach(n => n.classList.remove('selected'));
+          currentSelection.clear();
+        }
+        if (currentSelection.has(pill)) {
+          pill.classList.remove('selected');
+          currentSelection.delete(pill);
+        } else {
+          pill.classList.add('selected');
+          currentSelection.add(pill);
+        }
+      });
+
+      pill.addEventListener('dragstart', e => {
+        // if the dragged pill is not in selection, drag only it
+        if (!currentSelection.has(pill)) {
+          currentSelection.forEach(n => n.classList.remove('selected'));
+          currentSelection.clear();
+          pill.classList.add('selected');
+          currentSelection.add(pill);
+        }
+        dragged = pill;
+        pill.classList.add('dragging');
+        const names = Array.from(currentSelection).map(n => n.dataset.col);
+        e.dataTransfer.setData('text/plain', names.join(','));
+      });
+      pill.addEventListener('dragend', () => {
+        if (dragged) dragged.classList.remove('dragging');
+        dragged = null;
+      });
+    });
+
+    buckets.forEach(bucket => {
+      bucket.addEventListener('dragover', e => { e.preventDefault(); bucket.classList.add('drag-over'); });
+      bucket.addEventListener('dragleave', () => bucket.classList.remove('drag-over'));
+      bucket.addEventListener('drop', e => {
+        e.preventDefault();
+        bucket.classList.remove('drag-over');
+        if (!dragged) return;
+        const target = bucket.querySelector('.bucket-content');
+        if (currentSelection.size > 0) {
+          Array.from(currentSelection).forEach(node => target.appendChild(node));
+        } else {
+          target.appendChild(dragged);
+        }
+        ensureCloseButtons();
+        updateRunButton();
+      });
+    });
+
+    // Serialize roles on submit
+    document.getElementById('roleForm').addEventListener('submit', function(e) {
+      // Remove any previously generated inputs
+      this.querySelectorAll('input[name^="role_"]').forEach(n => n.remove());
+      this.querySelectorAll('input[name^="measure_type_"]').forEach(n => n.remove());
+
+      // all pills in each bucket determine role
+      const roleMap = {
+        'Location': document.querySelectorAll('#bucketLocation .pill'),
+        'Time': document.querySelectorAll('#bucketTime .pill'),
+        'Measures': document.querySelectorAll('#bucketMeasures .pill'),
+        'Others': document.querySelectorAll('#bucketOthers .pill'),
+      };
+
+      Object.entries(roleMap).forEach(([role, nodeList]) => {
+        nodeList.forEach(node => {
+          const name = node.dataset.col;
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = `role_${name}`;
+          input.value = role;
+          this.appendChild(input);
+
+          // measure type selection removed; backend will default
+        });
+      });
+
+      // Anything left in All columns bucket becomes Others by default unless placed
+      document.querySelectorAll('#allCols .pill').forEach(node => {
+        const name = node.dataset.col;
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = `role_${name}`;
+        input.value = 'Others';
+        this.appendChild(input);
+      });
+    });
+
+    // Close button to move back to All columns
+    document.body.addEventListener('click', function(e) {
+      const close = e.target.closest('.pill-close');
+      if (!close) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const pill = close.closest('.pill');
+      document.getElementById('allCols').appendChild(pill);
+      pill.classList.remove('selected');
+      currentSelection.delete(pill);
+      updateRunButton();
+    });
+
+    // clicking on empty space clears selection
+    document.addEventListener('click', function(e) {
+      if (e.target.closest('.pill')) return;
+      currentSelection.forEach(n => n.classList.remove('selected'));
+      currentSelection.clear();
+    });
+  </script>
+{% endblock %}
+
+
+

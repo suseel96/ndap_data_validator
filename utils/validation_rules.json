@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "defaultSchema": "National",
+  "schemas": {
+    "Global": {
+      "Location": { "notNull": true, "mandatory": false, "numericOnly": false },
+      "Measures": { "notNull": false, "mandatory": true,  "numericOnly": true  },
+      "Time":     { "notNull": true,  "mandatory": true,  "numericOnly": false },
+      "Others":   { "notNull": false, "mandatory": false, "numericOnly": false }
+    },
+    "National": {
+      "Location": { "notNull": true, "mandatory": false, "numericOnly": false },
+      "Measures": { "notNull": false, "mandatory": true,  "numericOnly": true  },
+      "Time":     { "notNull": true,  "mandatory": true,  "numericOnly": false },
+      "Others":   { "notNull": false, "mandatory": false, "numericOnly": false }
+    }
+  }
+}
+
