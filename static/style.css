@@ -97,8 +97,10 @@ html, body { background: var(--brand-bg); }
 table thead th { background: #f0f6ff; color: #0b1f44; border-bottom-color: var(--brand-border) !important; }
 
 /* Validation table row colors */
-.table-validation tbody tr.row-fail td { background-color: #ffeef0 !important; }
-.table-validation tbody tr.row-pass td { background-color: #f4fbf5; }
+.table-validation tbody tr.row-fail > td { background-color: #ffeef0 !important; }
+.table-validation tbody tr.row-pass > td { background-color: #f4fbf5 !important; }
+.table-validation tbody tr.row-fail > td:first-child { border-left: 3px solid #dc3545; }
+.table-validation tbody tr.row-pass > td:first-child { border-left: 3px solid #28a745; }
 
 
 /* Table gridlines (vertical and outer border) */
