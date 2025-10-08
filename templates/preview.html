@@ -4,7 +4,7 @@
   <style>
     table { font-size: 0.9rem; }
     /* Center column names in Step 2 preview table only */
-    .step2-preview table thead th { text-align: center; }
+    .step2-preview table thead th { text-align: center; position: sticky; top: 0; z-index: 1; background: #f0f6ff; }
     .dnd-board { display: grid; grid-template-columns: 1fr; gap: 16px; }
     .dnd-columns { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
     .bucket { background: #fff; border: 2px dashed var(--brand-border); border-radius: .5rem; min-height: 160px; padding: 12px; }
