@@ -109,9 +109,9 @@ table tbody tr.table-danger td { background-color: #ffeef0 !important; }
 .table-wrap { overflow-x: auto; }
 
 /* Scrollable fixed-height containers */
-.table-scroll { max-height: 360px; overflow: auto; border: 1px solid var(--brand-border); border-radius: .5rem; background: #fff; }
+.table-scroll { max-height: 360px; overflow: auto; border: 1px solid var(--brand-border); border-radius: .5rem; background: #fff; display: block; width: 100%; }
 /* Step 2 preview area */
-.step2-preview { max-height: 360px; overflow: auto; }
+.step2-preview { max-height: 360px; overflow: auto; display: block; }
 /* Drag-and-drop buckets scroll */
 .bucket .bucket-content { max-height: 260px; overflow-y: auto; }
 
