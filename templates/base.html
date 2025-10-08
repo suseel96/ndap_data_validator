@@ -39,17 +39,31 @@
           {% set completed = completed_steps | default([]) %}
           
           <li class="step {% if active_step == 1 %}active{% endif %} {% if 1 in completed %}completed{% endif %}">
-            <a href="/" class="step-link">
-              <div class="step-icon">1</div>
-              <div class="step-title">Upload CSV and preview</div>
-            </a>
+            {% if active_step == 1 %}
+              <span class="step-link">
+                <div class="step-icon">1</div>
+                <div class="step-title">Upload CSV and preview</div>
+              </span>
+            {% else %}
+              <a href="/" class="step-link">
+                <div class="step-icon">1</div>
+                <div class="step-title">Upload CSV and preview</div>
+              </a>
+            {% endif %}
           </li>
           <li class="step {% if active_step == 2 %}active{% endif %} {% if 2 in completed %}completed{% endif %} {% if 1 not in completed %}disabled{% endif %}">
             {% if 1 in completed %}
-              <a href="/preview{{ qs }}" class="step-link">
-                <div class="step-icon">2</div>
-                <div class="step-title">Select column types</div>
-              </a>
+              {% if active_step == 2 %}
+                <span class="step-link">
+                  <div class="step-icon">2</div>
+                  <div class="step-title">Select column types</div>
+                </span>
+              {% else %}
+                <a href="/preview{{ qs }}" class="step-link">
+                  <div class="step-icon">2</div>
+                  <div class="step-title">Select column types</div>
+                </a>
+              {% endif %}
             {% else %}
               <span class="step-link disabled">
                 <div class="step-icon">2</div>
@@ -59,10 +73,17 @@
           </li>
           <li class="step {% if active_step == 3 %}active{% endif %} {% if 3 in completed %}completed{% endif %} {% if 2 not in completed %}disabled{% endif %}">
             {% if 2 in completed %}
-              <a href="/validate{{ qs }}" class="step-link">
-                <div class="step-icon">3</div>
-                <div class="step-title">Perform validations</div>
-              </a>
+              {% if active_step == 3 %}
+                <span class="step-link">
+                  <div class="step-icon">3</div>
+                  <div class="step-title">Perform validations</div>
+                </span>
+              {% else %}
+                <a href="/validate{{ qs }}" class="step-link">
+                  <div class="step-icon">3</div>
+                  <div class="step-title">Perform validations</div>
+                </a>
+              {% endif %}
             {% else %}
               <span class="step-link disabled">
                 <div class="step-icon">3</div>
@@ -72,10 +93,17 @@
           </li>
           <li class="step {% if active_step == 4 %}active{% endif %} {% if 4 in completed %}completed{% endif %} {% if 3 not in completed %}disabled{% endif %}">
             {% if 3 in completed %}
-              <a href="/upload{{ qs }}" class="step-link">
-                <div class="step-icon">4</div>
-                <div class="step-title">Upload to AWS S3</div>
-              </a>
+              {% if active_step == 4 %}
+                <span class="step-link">
+                  <div class="step-icon">4</div>
+                  <div class="step-title">Upload to AWS S3</div>
+                </span>
+              {% else %}
+                <a href="/upload{{ qs }}" class="step-link">
+                  <div class="step-icon">4</div>
+                  <div class="step-title">Upload to AWS S3</div>
+                </a>
+              {% endif %}
             {% else %}
               <span class="step-link disabled">
                 <div class="step-icon">4</div>
