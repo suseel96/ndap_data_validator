@@ -2,8 +2,7 @@
 
 {% block content %}
   <style>
-    table { font-size: 0.9rem; }
-    /* Center column names in Step 2 preview table only */
+        /* Center column names in Step 2 preview table only */
     .step2-preview table thead th { text-align: center; position: sticky; top: 0; z-index: 1; background: #f0f6ff; }
     .dnd-board { display: grid; grid-template-columns: 1fr; gap: 16px; }
     .dnd-columns { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
@@ -16,9 +15,11 @@
     .pill-close { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 1px solid var(--brand-border); color: #495057; font-weight: 700; line-height: 16px; text-align: center; cursor: pointer; }
     .pill-close:hover { background: #ffecec; border-color: #ffb3b3; color: #c1121f; }
     #allCols .pill .pill-close { display: none; }
+    /* Marquee (canvas) selection rectangle */
+    .selection-rect { position: fixed; border: 1px dashed var(--brand-primary); background: rgba(13,110,253,.1); pointer-events: none; z-index: 9999; }
   </style>
 
-  <h4 class="mb-3">Step 2: Select column types {% if file_name %}<span class="text-muted">— {{ file_name }} ({{ record_count }} records)</span>{% endif %}</h4>
+  <h4 class="mb-3">Step 2: Select column types {% if file_name %}<span class="text-muted">&mdash; {{ file_name }} ({{ record_count }} records)</span>{% endif %}</h4>
   <div class="mb-3 step2-preview">
     {{ preview_html | safe }}
   </div>
@@ -84,6 +85,8 @@
     const runButton = document.getElementById('runButton');
     const runButtonWrapper = document.getElementById('runButtonWrapper');
     const roleForm = document.getElementById('roleForm');
+    const board = document.querySelector('.dnd-board');
+    let suppressClickClear = false;
 
     function getUnassignedCount() {
       return document.querySelectorAll('#allCols .pill').length;
@@ -261,12 +264,92 @@
       updateRunButton();
     });
 
-    // clicking on empty space clears selection
+    // clicking on empty space clears selection (unless suppressed after marquee)
     document.addEventListener('click', function(e) {
+      if (suppressClickClear) { suppressClickClear = false; return; }
       if (e.target.closest('.pill')) return;
       currentSelection.forEach(n => n.classList.remove('selected'));
       currentSelection.clear();
     });
+
+    // Marquee (canvas) selection: click-and-drag on empty board area
+    let marqueeActive = false;
+    let marqueeStart = { x: 0, y: 0 };
+    let marqueeRectEl = null;
+
+    function rectsOverlap(a, b) {
+      return !(b.left > a.right ||
+               b.right < a.left ||
+               b.top > a.bottom ||
+               b.bottom < a.top);
+    }
+
+    function updateMarqueeSelection(r) {
+      // Clear previous selection and select all pills overlapping rectangle r
+      currentSelection.forEach(n => n.classList.remove('selected'));
+      currentSelection.clear();
+      const pills = document.querySelectorAll('.pill');
+      pills.forEach(p => {
+        const pb = p.getBoundingClientRect();
+        if (rectsOverlap(r, pb)) {
+          p.classList.add('selected');
+          currentSelection.add(p);
+        }
+      });
+    }
+
+    if (board) {
+      board.addEventListener('mousedown', function(e) {
+        // Start marquee only when not starting on a pill or its controls
+        if (e.button !== 0) return; // left click only
+        if (e.target.closest('.pill')) return;
+        marqueeActive = true;
+        marqueeStart = { x: e.clientX, y: e.clientY };
+        // Create rectangle element
+        marqueeRectEl = document.createElement('div');
+        marqueeRectEl.className = 'selection-rect';
+        marqueeRectEl.style.left = marqueeStart.x + 'px';
+        marqueeRectEl.style.top = marqueeStart.y + 'px';
+        marqueeRectEl.style.width = '0px';
+        marqueeRectEl.style.height = '0px';
+        document.body.appendChild(marqueeRectEl);
+        // Prevent text selection
+        if (window.getSelection) {
+          const sel = window.getSelection();
+          if (sel && sel.removeAllRanges) sel.removeAllRanges();
+        }
+        e.preventDefault();
+      });
+
+      document.addEventListener('mousemove', function(e) {
+        if (!marqueeActive || !marqueeRectEl) return;
+        const x1 = marqueeStart.x;
+        const y1 = marqueeStart.y;
+        const x2 = e.clientX;
+        const y2 = e.clientY;
+        const left = Math.min(x1, x2);
+        const top = Math.min(y1, y2);
+        const width = Math.abs(x2 - x1);
+        const height = Math.abs(y2 - y1);
+        marqueeRectEl.style.left = left + 'px';
+        marqueeRectEl.style.top = top + 'px';
+        marqueeRectEl.style.width = width + 'px';
+        marqueeRectEl.style.height = height + 'px';
+        const rect = { left, top, right: left + width, bottom: top + height };
+        updateMarqueeSelection(rect);
+      });
+
+      document.addEventListener('mouseup', function() {
+        if (!marqueeActive) return;
+        marqueeActive = false;
+        if (marqueeRectEl && marqueeRectEl.parentNode) {
+          marqueeRectEl.parentNode.removeChild(marqueeRectEl);
+        }
+        marqueeRectEl = null;
+        // Prevent the ensuing click from clearing the newly made selection
+        suppressClickClear = true;
+      });
+    }
   </script>
 {% endblock %}
 

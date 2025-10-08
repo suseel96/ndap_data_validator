@@ -17,9 +17,10 @@
               <a class="btn btn-sm btn-outline-primary me-2" href="/admin/users">Admin Panel</a>
               <a class="btn btn-sm btn-outline-primary me-2" href="/admin/logs">Logs</a>
             {% endif %}
+            <a class="btn btn-sm btn-outline-primary me-2" href="/">Upload New File</a>
             <a class="btn btn-sm btn-outline-primary me-2" href="/logs">My Logs</a>
             <a class="btn btn-sm btn-outline-primary me-2" href="/airflow">Airflow</a>
-            <a class="btn btn-sm btn-outline-secondary" href="/logout">Logout</a>
+            <a class="btn btn-sm btn-primary" href="/logout">Logout</a>
           {% else %}
             {% if request.url.path != '/login' %}
               <a class="btn btn-sm btn-primary" href="/login">Login</a>

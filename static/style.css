@@ -8,7 +8,7 @@
 }
 
 /* Layout */
-html { font-size: 16px; }
+html { font-size: 14px; }
 html, body { background: var(--brand-bg); }
 .app-shell { min-height: calc(100vh - 56px); }
 .app-header { background: linear-gradient(0deg, #ffffff, #f8fbff); }
@@ -95,7 +95,11 @@ html, body { background: var(--brand-bg); }
 /* Cards and tables */
 .card { border-color: var(--brand-border); box-shadow: 0 1px 2px rgba(13,110,253,0.04); }
 table thead th { background: #f0f6ff; color: #0b1f44; border-bottom-color: var(--brand-border) !important; }
-table tbody tr.table-danger td { background-color: #ffeef0 !important; }
+
+/* Validation table row colors */
+.table-validation tbody tr.row-fail td { background-color: #ffeef0 !important; }
+.table-validation tbody tr.row-pass td { background-color: #f4fbf5; }
+
 
 /* Table gridlines (vertical and outer border) */
 .table { border: 1px solid var(--brand-border); border-collapse: separate; border-spacing: 0; }
