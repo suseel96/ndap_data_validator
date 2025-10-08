@@ -49,6 +49,11 @@ class Database:
                 );
                 """
             )
+            # Backfill columns for uploads table (validation snapshot persistence)
+            con.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS columns_json TEXT;")
+            con.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS role_selection_json TEXT;")
+            con.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS time_date_only BOOLEAN;")
+            con.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS validated_passed BOOLEAN;")
             # Backfill columns if database exists from older version
             con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;")
             con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;")
@@ -238,6 +243,34 @@ class Database:
             if not row:
                 return None
             return {"filename": row[0], "record_count": int(row[1] or 0), "size_bytes": int(row[2] or 0)}
+        finally:
+            con.close()
+
+    def save_validation_snapshot(self, token: str, columns_json: str, role_selection_json: str, time_date_only: bool, passed: bool) -> None:
+        con = self.connect()
+        try:
+            con.execute(
+                "UPDATE uploads SET columns_json = ?, role_selection_json = ?, time_date_only = ?, validated_passed = ? WHERE token = ?",
+                [columns_json, role_selection_json, bool(time_date_only), bool(passed), token],
+            )
+        finally:
+            con.close()
+
+    def get_validation_snapshot(self, token: str) -> Optional[Dict[str, Any]]:
+        con = self.connect()
+        try:
+            row = con.execute(
+                "SELECT columns_json, role_selection_json, time_date_only, validated_passed FROM uploads WHERE token = ?",
+                [token],
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "columns_json": row[0],
+                "role_selection_json": row[1],
+                "time_date_only": bool(row[2]) if row[2] is not None else False,
+                "validated_passed": bool(row[3]) if row[3] is not None else False,
+            }
         finally:
             con.close()
 
