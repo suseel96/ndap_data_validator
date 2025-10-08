@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import traceback
 from typing import Dict, List, Tuple
 import os
@@ -286,6 +287,17 @@ async def validate(request: Request):
                 "completed_steps": STEP_COMPLETION.get(token, set()),
             },
         )
+        # Persist validation snapshot to DB for resilience across reloads
+        try:
+            DB.save_validation_snapshot(
+                token,
+                json.dumps(columns),
+                json.dumps(role_selection),
+                time_date_only,
+                passed,
+            )
+        except Exception:
+            pass
         try:
             DB.log_validation(token, get_username(request), passed, ",".join(failed_columns))
         except Exception:
@@ -347,10 +359,41 @@ async def upload_get(request: Request, token: str | None = None):
     if not token:
         return RedirectResponse(url="/", status_code=302)
     state = VALIDATION_STATE.get(token)
-    if not state:
-        return RedirectResponse(url=f"/preview?token={token}", status_code=302)
-    if not state.get("passed", False):
-        return RedirectResponse(url=f"/validate?token={token}", status_code=302)
+    if not state or not state.get("passed", False):
+        # Fallback to DB snapshot if available
+        try:
+            snap = DB.get_validation_snapshot(token)
+        except Exception:
+            snap = None
+        if snap and snap.get("validated_passed"):
+            try:
+                cols = json.loads(snap.get("columns_json") or "[]")
+            except Exception:
+                cols = []
+            try:
+                roles = json.loads(snap.get("role_selection_json") or "{}")
+            except Exception:
+                roles = {}
+            state = {
+                "columns": cols,
+                "role_selection": roles,
+                "measure_type_selection": {},
+                "time_date_only": bool(snap.get("time_date_only")),
+                "schema": VALIDATION_STATE.get(token, {}).get("schema", "National"),
+                "rows": [],
+                "passed": True,
+                "failed_columns": [],
+            }
+            VALIDATION_STATE[token] = state
+            if token not in STEP_COMPLETION:
+                STEP_COMPLETION[token] = set()
+            STEP_COMPLETION[token].add(2)
+            STEP_COMPLETION[token].add(3)
+        else:
+            # No snapshot/passed info, route back appropriately
+            if not state:
+                return RedirectResponse(url=f"/preview?token={token}", status_code=302)
+            return RedirectResponse(url=f"/validate?token={token}", status_code=302)
 
     # Ensure step 3 is recorded as completed when reaching step 4
     if token not in STEP_COMPLETION:
