@@ -110,6 +110,8 @@ table tbody tr.table-danger td { background-color: #ffeef0 !important; }
 
 /* Scrollable fixed-height containers */
 .table-scroll { max-height: 360px; overflow: auto; border: 1px solid var(--brand-border); border-radius: .5rem; background: #fff; display: block; width: 100%; }
+/* Sticky table headers inside scroll container */
+.table-scroll thead th { position: sticky; top: 0; z-index: 2; background: #f0f6ff; }
 /* Step 2 preview area */
 .step2-preview { max-height: 360px; overflow: auto; display: block; }
 /* Drag-and-drop buckets scroll */
