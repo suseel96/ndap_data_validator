@@ -48,9 +48,12 @@ def require_login(request: Request) -> bool:
     return bool(get_username(request))
 
 
-
-def _read_df_from_bytes(data: bytes) -> pd.DataFrame:
-    return pd.read_csv(io.BytesIO(data), nrows=10)
+def _read_df_from_bytes(data: bytes, nrows=None) -> pd.DataFrame:
+    return (
+        pd.read_csv(io.BytesIO(data), nrows=nrows)
+        if nrows
+        else pd.read_csv(io.BytesIO(data))
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -75,7 +78,7 @@ async def preview(request: Request, file: UploadFile = File(...), schema: str = 
         token = uuid4().hex
         DATA_STORE[token] = content
 
-        df = _read_df_from_bytes(content)
+        df = _read_df_from_bytes(content, nrows=10)
         columns: List[str] = list(df.columns)
         preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped")
 
@@ -113,7 +116,7 @@ async def preview_get(request: Request, token: str):
     if not content:
         return RedirectResponse(url="/", status_code=302)
 
-    df = _read_df_from_bytes(content)
+    df = _read_df_from_bytes(content, nrows=10)
     columns: List[str] = list(df.columns)
     preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped")
 
@@ -535,7 +538,6 @@ async def reset_password_post(request: Request, password1: str = Form(...), pass
         return RedirectResponse(url="/login", status_code=302)
     DB.set_password(int(user_id), password1, clear_force_reset=True)
     return RedirectResponse(url="/", status_code=302)
-
 
 
 @app.get("/airflow", response_class=HTMLResponse)

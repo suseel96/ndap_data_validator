@@ -3,6 +3,8 @@
 {% block content %}
   <style>
     table { font-size: 0.9rem; }
+    /* Center column names in Step 2 preview table only */
+    .step2-preview table thead th { text-align: center; }
     .dnd-board { display: grid; grid-template-columns: 1fr; gap: 16px; }
     .dnd-columns { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
     .bucket { background: #fff; border: 2px dashed var(--brand-border); border-radius: .5rem; min-height: 160px; padding: 12px; }
@@ -17,7 +19,7 @@
   </style>
 
   <h4 class="mb-3">Step 2: Select column types</h4>
-  <div class="mb-3">
+  <div class="mb-3 step2-preview">
     {{ preview_html | safe }}
   </div>
 

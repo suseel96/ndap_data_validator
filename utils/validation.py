@@ -169,7 +169,9 @@ def coerce_dataframe_by_roles(
         if role == "Location":
             converted, errs = _coerce_to_string(s)
         elif role == "Time":
-            converted, errs = _coerce_to_datetime(s, date_only=time_date_only)
+            # Do not coerce Time columns; keep original values as strings
+            # to avoid introducing NaT/NA from parse failures.
+            converted, errs = _coerce_to_string(s)
         elif role == "Measures":
             mtype = measure_type_selection.get(col, "float")
             if mtype == "integer":
@@ -227,7 +229,7 @@ def validate_dataframe_by_roles(
             reasons.append("Non-numeric values detected")
         if not_null_req and nulls > 0:
             passed = False
-            reasons.append("No Null required")
+            reasons.append("No Nulls allowed")
 
         if not passed:
             failed_columns.append(col)
