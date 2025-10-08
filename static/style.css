@@ -8,6 +8,7 @@
 }
 
 /* Layout */
+html { font-size: 16px; }
 html, body { background: var(--brand-bg); }
 .app-shell { min-height: calc(100vh - 56px); }
 .app-header { background: linear-gradient(0deg, #ffffff, #f8fbff); }
@@ -106,6 +107,13 @@ table tbody tr.table-danger td { background-color: #ffeef0 !important; }
 .table { margin-bottom: 0; }
 .card .table { margin-bottom: 0; }
 .table-wrap { overflow-x: auto; }
+
+/* Scrollable fixed-height containers */
+.table-scroll { max-height: 360px; overflow: auto; border: 1px solid var(--brand-border); border-radius: .5rem; background: #fff; }
+/* Step 2 preview area */
+.step2-preview { max-height: 360px; overflow: auto; }
+/* Drag-and-drop buckets scroll */
+.bucket .bucket-content { max-height: 260px; overflow-y: auto; }
 
 /* Forms */
 .form-control, .form-select { border-color: var(--brand-border); }

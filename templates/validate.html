@@ -3,7 +3,7 @@
 {% block content %}
   <h4 class="mb-3">Step 3: Perform validations {% if file_name %}<span class="text-muted">— {{ file_name }} ({{ record_count }} records)</span>{% endif %}</h4>
 
-    <table class="table table-sm table-striped mt-4">
+    <div class="table-scroll mt-3"><table class="table table-sm table-striped">
       <thead>
         <tr>
           <th>Column Name</th>
@@ -26,7 +26,7 @@
           </tr>
         {% endfor %}
       </tbody>
-    </table>
+    </table></div>
 
     {% if passed %}
       <div class="alert alert-success d-flex align-items-center justify-content-between">
