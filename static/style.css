@@ -94,6 +94,12 @@ html, body { background: var(--brand-bg); }
 table thead th { background: #f0f6ff; color: #0b1f44; border-bottom-color: var(--brand-border) !important; }
 table tbody tr.table-danger td { background-color: #ffeef0 !important; }
 
+/* Table gridlines (vertical and outer border) */
+.table { border: 1px solid var(--brand-border); border-collapse: separate; border-spacing: 0; }
+.table > :not(caption) > * > * { border-right: 1px solid var(--brand-border); border-bottom: 1px solid var(--brand-border); }
+.table > :not(caption) > * > *:last-child { border-right: 0; }
+.table thead th { border-bottom: 1px solid var(--brand-border) !important; }
+
 /* Tables responsive */
 .table { margin-bottom: 0; }
 .card .table { margin-bottom: 0; }
