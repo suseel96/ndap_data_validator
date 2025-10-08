@@ -109,7 +109,7 @@ async def preview(request: Request, file: UploadFile = File(...), schema: str = 
 
         df = _read_df_from_bytes(content, nrows=10)
         columns: List[str] = list(df.columns)
-        preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped", na_rep="NULL")
+        preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped", na_rep="")
         file_name = file.filename or ""
         try:
             record_count = int(_read_df_from_bytes(content).shape[0])
@@ -160,7 +160,7 @@ async def preview_get(request: Request, token: str | None = None):
 
     df = _read_df_from_bytes(content, nrows=10)
     columns: List[str] = list(df.columns)
-    preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped", na_rep="NULL")
+    preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped", na_rep="")
 
     state = VALIDATION_STATE.get(token, {})
     schema = state.get("schema", "National")
@@ -516,7 +516,7 @@ async def admin_users(request: Request):
     if not require_admin(request):
         return RedirectResponse(url="/", status_code=302)
     users = DB.list_users()
-    return templates.TemplateResponse("admin_users.html", {"request": request, "title": "Manage Users", "users": users})
+    return templates.TemplateResponse("admin_users.html", {"request": request, "title": "Manage Users", "users": users, "show_stepper": False})
 @app.get("/admin/logs", response_class=HTMLResponse)
 async def admin_logs(request: Request, username: str | None = None):
     if not require_login(request):
@@ -526,8 +526,7 @@ async def admin_logs(request: Request, username: str | None = None):
     validation_logs = DB.list_validation_logs(username=username or None)
     upload_logs = DB.list_upload_logs(username=username or None)
     return templates.TemplateResponse(
-        "admin_logs.html",
-        {"request": request, "title": "Logs", "validation_logs": validation_logs, "upload_logs": upload_logs, "filter_username": username or ""},
+        "admin_logs.html", {"request": request, "title": "Logs", "validation_logs": validation_logs, "upload_logs": upload_logs, "filter_username": username or "", "show_stepper": False},
     )
 
 
@@ -539,8 +538,7 @@ async def user_logs(request: Request):
     validation_logs = DB.list_validation_logs(username=username)
     upload_logs = DB.list_upload_logs(username=username)
     return templates.TemplateResponse(
-        "user_logs.html",
-        {"request": request, "title": "My Logs", "validation_logs": validation_logs, "upload_logs": upload_logs},
+        "user_logs.html", {"request": request, "title": "My Logs", "validation_logs": validation_logs, "upload_logs": upload_logs, "show_stepper": False},
     )
 
 
