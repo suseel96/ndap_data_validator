@@ -11,6 +11,7 @@
           <thead>
             <tr>
               <th>Time</th>
+              <th>Filename</th>
               <th>Passed</th>
               <th>Failed columns</th>
             </tr>
@@ -19,6 +20,7 @@
             {% for r in validation_logs %}
               <tr>
                 <td>{{ r.created_at }}</td>
+                <td>{{ r.filename or '' }}</td>
                 <td>{{ 'Yes' if r.passed else 'No' }}</td>
                 <td>{{ r.failed_columns }}</td>
               </tr>
@@ -35,6 +37,7 @@
             <tr>
               <th>Time</th>
               <th>Token</th>
+              <th>Filename</th>
               <th>Bucket</th>
               <th>Key</th>
               <th>Cleaned</th>
@@ -45,6 +48,7 @@
               <tr>
                 <td>{{ r.created_at }}</td>
                 <td><code>{{ r.token }}</code></td>
+                <td>{{ r.filename or '' }}</td>
                 <td>{{ r.bucket }}</td>
                 <td><code>{{ r.object_key }}</code></td>
                 <td>{{ 'Yes' if r.cleaned else 'No' }}</td>

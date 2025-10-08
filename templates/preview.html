@@ -18,7 +18,7 @@
     #allCols .pill .pill-close { display: none; }
   </style>
 
-  <h4 class="mb-3">Step 2: Select column types</h4>
+  <h4 class="mb-3">Step 2: Select column types {% if file_name %}<span class="text-muted">— {{ file_name }} ({{ record_count }} records)</span>{% endif %}</h4>
   <div class="mb-3 step2-preview">
     {{ preview_html | safe }}
   </div>
@@ -59,13 +59,13 @@
           <div class="bucket-header">Time</div>
           <div class="bucket-content" id="bucketTime"></div>
         </div>
-        <div class="bucket" data-role="Measures">
-          <div class="bucket-header">Measures</div>
-          <div class="bucket-content" id="bucketMeasures"></div>
-        </div>
         <div class="bucket" data-role="Others">
           <div class="bucket-header">Others</div>
           <div class="bucket-content" id="bucketOthers"></div>
+        </div>
+        <div class="bucket" data-role="Measures">
+          <div class="bucket-header">Measures</div>
+          <div class="bucket-content" id="bucketMeasures"></div>
         </div>
       </div>
     </div>
@@ -202,6 +202,9 @@
         } else {
           target.appendChild(dragged);
         }
+        // Clear selection after successful drop
+        currentSelection.forEach(n => n.classList.remove('selected'));
+        currentSelection.clear();
         ensureCloseButtons();
         updateRunButton();
       });
