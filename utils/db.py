@@ -36,6 +36,19 @@ class Database:
                 );
                 """
             )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS uploads (
+                  token TEXT,
+                  username TEXT,
+                  filename TEXT,
+                  data_bytes BLOB,
+                  size_bytes BIGINT,
+                  record_count BIGINT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
             # Backfill columns if database exists from older version
             con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;")
             con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;")
@@ -196,19 +209,59 @@ class Database:
         finally:
             con.close()
 
+    # Upload persistence for CSV bytes
+    def save_upload(self, token: str, username: Optional[str], filename: str, data_bytes: bytes, record_count: int) -> None:
+        con = self.connect()
+        try:
+            con.execute("DELETE FROM uploads WHERE token = ?", [token])
+            con.execute(
+                "INSERT INTO uploads (token, username, filename, data_bytes, size_bytes, record_count) VALUES (?, ?, ?, ?, ?, ?)",
+                [token, username or "", filename, data_bytes, int(len(data_bytes)), int(record_count)],
+            )
+        finally:
+            con.close()
+
+    def get_upload_bytes(self, token: str) -> Optional[bytes]:
+        con = self.connect()
+        try:
+            row = con.execute("SELECT data_bytes FROM uploads WHERE token = ?", [token]).fetchone()
+            if not row:
+                return None
+            return row[0]
+        finally:
+            con.close()
+
+    def get_upload_meta(self, token: str) -> Optional[Dict[str, Any]]:
+        con = self.connect()
+        try:
+            row = con.execute("SELECT filename, record_count, size_bytes FROM uploads WHERE token = ?", [token]).fetchone()
+            if not row:
+                return None
+            return {"filename": row[0], "record_count": int(row[1] or 0), "size_bytes": int(row[2] or 0)}
+        finally:
+            con.close()
+
     def list_validation_logs(self, username: Optional[str] = None) -> list[Dict[str, Any]]:
         con = self.connect()
         try:
             if username:
                 rows = con.execute(
-                    "SELECT id, token, username, passed, failed_columns, created_at FROM validation_logs WHERE username = ? ORDER BY created_at DESC",
+                    (
+                        "SELECT v.id, v.token, v.username, v.passed, v.failed_columns, v.created_at, u.filename "
+                        "FROM validation_logs v LEFT JOIN uploads u ON v.token = u.token "
+                        "WHERE v.username = ? ORDER BY v.created_at DESC"
+                    ),
                     [username],
                 ).fetchall()
             else:
                 rows = con.execute(
-                    "SELECT id, token, username, passed, failed_columns, created_at FROM validation_logs ORDER BY created_at DESC"
+                    (
+                        "SELECT v.id, v.token, v.username, v.passed, v.failed_columns, v.created_at, u.filename "
+                        "FROM validation_logs v LEFT JOIN uploads u ON v.token = u.token "
+                        "ORDER BY v.created_at DESC"
+                    )
                 ).fetchall()
-            cols = ["id", "token", "username", "passed", "failed_columns", "created_at"]
+            cols = ["id", "token", "username", "passed", "failed_columns", "created_at", "filename"]
             return [dict(zip(cols, r)) for r in rows]
         finally:
             con.close()
@@ -218,14 +271,22 @@ class Database:
         try:
             if username:
                 rows = con.execute(
-                    "SELECT id, token, username, bucket, object_key, s3_uri, cleaned, created_at FROM upload_logs WHERE username = ? ORDER BY created_at DESC",
+                    (
+                        "SELECT l.id, l.token, l.username, l.bucket, l.object_key, l.s3_uri, l.cleaned, l.created_at, u.filename "
+                        "FROM upload_logs l LEFT JOIN uploads u ON l.token = u.token "
+                        "WHERE l.username = ? ORDER BY l.created_at DESC"
+                    ),
                     [username],
                 ).fetchall()
             else:
                 rows = con.execute(
-                    "SELECT id, token, username, bucket, object_key, s3_uri, cleaned, created_at FROM upload_logs ORDER BY created_at DESC"
+                    (
+                        "SELECT l.id, l.token, l.username, l.bucket, l.object_key, l.s3_uri, l.cleaned, l.created_at, u.filename "
+                        "FROM upload_logs l LEFT JOIN uploads u ON l.token = u.token "
+                        "ORDER BY l.created_at DESC"
+                    )
                 ).fetchall()
-            cols = ["id", "token", "username", "bucket", "object_key", "s3_uri", "cleaned", "created_at"]
+            cols = ["id", "token", "username", "bucket", "object_key", "s3_uri", "cleaned", "created_at", "filename"]
             return [dict(zip(cols, r)) for r in rows]
         finally:
             con.close()

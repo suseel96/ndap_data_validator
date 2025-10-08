@@ -13,6 +13,8 @@ html, body { background: var(--brand-bg); }
 .app-header { background: linear-gradient(0deg, #ffffff, #f8fbff); }
 .app-header h5 { color: var(--brand-primary); font-weight: 700; }
 .brand-title { font-size: 1.25rem; letter-spacing: .3px; color: #0a58ca; text-transform: uppercase; }
+.brand-title-link { color: #0a58ca; text-decoration: none; }
+.brand-title-link:hover { text-decoration: underline; }
 
 /* Page headers and cards */
 .page-header { border-bottom: 1px solid var(--brand-border); padding-bottom: 6px; }

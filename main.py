@@ -56,6 +56,33 @@ def _read_df_from_bytes(data: bytes, nrows=None) -> pd.DataFrame:
     )
 
 
+def _get_data_bytes(token: str) -> bytes | None:
+    # Prefer memory; fallback to DB if present
+    data = DATA_STORE.get(token)
+    if data:
+        return data
+    try:
+        return DB.get_upload_bytes(token)
+    except Exception:
+        return None
+
+def _get_meta(token: str) -> Dict[str, object]:
+    state = VALIDATION_STATE.get(token, {}) or {}
+    file_name = state.get("file_name", "")
+    record_count = int(state.get("record_count", 0) or 0)
+    if (not file_name) or record_count == 0:
+        try:
+            meta = DB.get_upload_meta(token)
+            if meta:
+                if not file_name:
+                    file_name = meta.get("filename") or ""
+                if record_count == 0:
+                    record_count = int(meta.get("record_count") or 0)
+        except Exception:
+            pass
+    return {"file_name": file_name, "record_count": record_count}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     if not require_login(request):
@@ -77,13 +104,24 @@ async def preview(request: Request, file: UploadFile = File(...), schema: str = 
         content = await file.read()
         token = uuid4().hex
         DATA_STORE[token] = content
+        # Persist to database as well to survive reloads
+        # (we call DB.save_upload below after computing record_count)
 
         df = _read_df_from_bytes(content, nrows=10)
         columns: List[str] = list(df.columns)
-        preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped")
+        preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped", na_rep="NULL")
+        file_name = file.filename or ""
+        try:
+            record_count = int(_read_df_from_bytes(content).shape[0])
+        except Exception:
+            record_count = 0
+        try:
+            DB.save_upload(token, get_username(request), file_name, content, record_count)
+        except Exception:
+            pass
 
         # Persist selected schema and mark step 1 as completed
-        VALIDATION_STATE[token] = {"schema": schema}
+        VALIDATION_STATE[token] = {"schema": schema, "file_name": file_name, "record_count": record_count}
         STEP_COMPLETION[token] = {1}
         return templates.TemplateResponse(
             "preview.html",
@@ -95,6 +133,8 @@ async def preview(request: Request, file: UploadFile = File(...), schema: str = 
                 "role_options": ROLE_OPTIONS,
                 "measure_types": MEASURE_TYPES,
                 "schema": schema,
+                "file_name": file_name,
+                "record_count": record_count,
                 "active_step": 2,
                 "title": "Select types",
                 "completed_steps": STEP_COMPLETION.get(token, set()),
@@ -108,19 +148,23 @@ async def preview(request: Request, file: UploadFile = File(...), schema: str = 
 
 
 @app.get("/preview", response_class=HTMLResponse)
-async def preview_get(request: Request, token: str):
+async def preview_get(request: Request, token: str | None = None):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
+    if not token:
+        return RedirectResponse(url="/", status_code=302)
     # Re-render preview/selection by reading back from stored bytes
-    content = DATA_STORE.get(token)
+    content = _get_data_bytes(token)
     if not content:
         return RedirectResponse(url="/", status_code=302)
 
     df = _read_df_from_bytes(content, nrows=10)
     columns: List[str] = list(df.columns)
-    preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped")
+    preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped", na_rep="NULL")
 
-    schema = VALIDATION_STATE.get(token, {}).get("schema", "National")
+    state = VALIDATION_STATE.get(token, {})
+    schema = state.get("schema", "National")
+    meta = _get_meta(token)
     return templates.TemplateResponse(
         "preview.html",
         {
@@ -131,6 +175,8 @@ async def preview_get(request: Request, token: str):
             "role_options": ROLE_OPTIONS,
             "measure_types": MEASURE_TYPES,
             "schema": schema,
+            "file_name": meta.get("file_name", ""),
+            "record_count": meta.get("record_count", 0),
             "active_step": 2,
             "title": "Select types",
             "completed_steps": STEP_COMPLETION.get(token, set()),
@@ -158,12 +204,12 @@ async def validate(request: Request):
     time_date_only = form.get("time_date_only") == "on"
 
     try:
-        if token not in DATA_STORE:
+        if not _get_data_bytes(token):
             return templates.TemplateResponse(
                 "upload.html",
                 {"request": request, "error": "Session expired or file not found. Please re-upload your CSV."},
             )
-        data = DATA_STORE[token]
+        data = _get_data_bytes(token)
         df = _read_df_from_bytes(data)
 
         cleaned_df, coercion_report = coerce_dataframe_by_roles(
@@ -197,6 +243,7 @@ async def validate(request: Request):
         failed_columns = validation_report.get("failed_columns", [])
 
         # persist validation state for navigation
+        meta = _get_meta(token)
         VALIDATION_STATE[token] = {
             "columns": columns,
             "role_selection": role_selection,
@@ -206,6 +253,8 @@ async def validate(request: Request):
             "rows": per_column_rows,
             "passed": passed,
             "failed_columns": failed_columns,
+            "file_name": meta.get("file_name", ""),
+            "record_count": meta.get("record_count", 0),
         }
         # Mark step 2 as completed
         if token not in STEP_COMPLETION:
@@ -230,6 +279,8 @@ async def validate(request: Request):
                 "rows": per_column_rows,
                 "passed": passed,
                 "failed_columns": failed_columns,
+                "file_name": meta.get("file_name", ""),
+                "record_count": meta.get("record_count", 0),
                 "active_step": 3,
                 "title": "Validate",
                 "completed_steps": STEP_COMPLETION.get(token, set()),
@@ -249,9 +300,11 @@ async def validate(request: Request):
 
 
 @app.get("/validate", response_class=HTMLResponse)
-async def validate_get(request: Request, token: str):
+async def validate_get(request: Request, token: str | None = None):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
+    if not token:
+        return RedirectResponse(url="/", status_code=302)
     state = VALIDATION_STATE.get(token)
     if not state:
         # If we do not have validation state, send user to selection step
@@ -278,6 +331,8 @@ async def validate_get(request: Request, token: str):
             "rows": state.get("rows", []),
             "passed": state.get("passed", False),
             "failed_columns": state.get("failed_columns", []),
+            "file_name": _get_meta(token).get("file_name", ""),
+            "record_count": _get_meta(token).get("record_count", 0),
             "active_step": 3,
             "title": "Validate",
             "completed_steps": STEP_COMPLETION.get(token, set()),
@@ -286,9 +341,11 @@ async def validate_get(request: Request, token: str):
 
 
 @app.get("/upload", response_class=HTMLResponse)
-async def upload_get(request: Request, token: str):
+async def upload_get(request: Request, token: str | None = None):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
+    if not token:
+        return RedirectResponse(url="/", status_code=302)
     state = VALIDATION_STATE.get(token)
     if not state:
         return RedirectResponse(url=f"/preview?token={token}", status_code=302)
@@ -309,6 +366,8 @@ async def upload_get(request: Request, token: str):
             "role_selection": state.get("role_selection", {}),
             "measure_type_selection": state.get("measure_type_selection", {}),
             "time_date_only": state.get("time_date_only", False),
+            "file_name": _get_meta(token).get("file_name", ""),
+            "record_count": _get_meta(token).get("record_count", 0),
             "active_step": 4,
             "title": "Upload",
             "completed_steps": STEP_COMPLETION.get(token, set()),
@@ -342,12 +401,12 @@ async def upload(
         measure_type_selection[col] = str(form.get(f"measure_type_{col}", "float"))
 
     try:
-        if token not in DATA_STORE:
+        if not _get_data_bytes(token):
             return templates.TemplateResponse(
                 "upload.html",
                 {"request": request, "error": "Session expired or file not found. Please re-upload your CSV."},
             )
-        data = DATA_STORE[token]
+        data = _get_data_bytes(token)
         df = _read_df_from_bytes(data)
 
         cleaned_df, _ = coerce_dataframe_by_roles(
@@ -388,6 +447,8 @@ async def upload(
                 "request": request,
                 "success": True,
                 "s3_uri": s3_uri,
+                "file_name": _get_meta(token).get("file_name", ""),
+                "record_count": _get_meta(token).get("record_count", 0),
                 "active_step": 4,
                 "title": "Upload",
                 "token": token,
@@ -409,6 +470,8 @@ async def upload(
                 "success": False,
                 "error": str(ex),
                 "trace": trace,
+                "file_name": _get_meta(token).get("file_name", ""),
+                "record_count": _get_meta(token).get("record_count", 0),
                 "active_step": 4,
                 "title": "Upload",
                 "token": token,
