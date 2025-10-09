@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, List, Tuple, Optional
+import re
 import json
 import os
 
@@ -143,6 +144,40 @@ ROLE_OPTIONS: List[str] = [
 MEASURE_TYPES: List[str] = ["integer", "float"]
 
 
+def _count_time_format_errors(series: pd.Series) -> int:
+    month = r"Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec"
+    patterns: List[Tuple[str, re.Pattern]] = [
+        ("YYYY", re.compile(r"^\d{4}$")),
+        ("YYYY-YY", re.compile(r"^\d{4}-\d{2}$")),
+        ("MMM-YYYY", re.compile(fr"^(?:{month})-\d{{4}}$", re.IGNORECASE)),
+        ("MMM-MMM, YYYY", re.compile(fr"^(?:{month})-(?:{month}),\s*\d{{4}}$", re.IGNORECASE)),
+    ]
+    vals = series[~series.isna()].astype("string").dropna()
+    invalid = 0
+    valid_labels: List[str] = []
+    for val in vals:
+        v = str(val).strip()
+        if v == "":
+            invalid += 1
+            continue
+        matched = None
+        for label, pat in patterns:
+            if pat.match(v):
+                matched = label
+                break
+        if matched is None:
+            invalid += 1
+        else:
+            valid_labels.append(matched)
+    # Count rows not matching the majority valid format as extra errors
+    extra_inconsistent = 0
+    if valid_labels:
+        counts: Dict[str, int] = {}
+        for lab in valid_labels:
+            counts[lab] = counts.get(lab, 0) + 1
+        majority = max(counts, key=counts.get)
+        extra_inconsistent = sum(1 for lab in valid_labels if lab != majority)
+    return int(invalid + extra_inconsistent)
 def guess_role_for_series(series: pd.Series, column_name: Optional[str] = None) -> Tuple[str, Optional[str]]:
     name = (column_name or series.name or "").lower()
     if pd.api.types.is_datetime64_any_dtype(series) or any(tok in name for tok in ["date", "time", "year", "month"]):
@@ -169,9 +204,9 @@ def coerce_dataframe_by_roles(
         if role == "Location":
             converted, errs = _coerce_to_string(s)
         elif role == "Time":
-            # Do not coerce Time columns; keep original values as strings
-            # to avoid introducing NaT/NA from parse failures.
-            converted, errs = _coerce_to_string(s)
+            # Keep as strings; count invalid time format rows as conversion errors
+            converted, _ = _coerce_to_string(s)
+            errs = _count_time_format_errors(s)
         elif role == "Measures":
             mtype = measure_type_selection.get(col, "float")
             if mtype == "integer":
@@ -208,6 +243,15 @@ def validate_dataframe_by_roles(
     schema_key = schema_name or rules.get("defaultSchema") or "National"
     schema = schemas.get(schema_key, {}) if isinstance(schemas, dict) else {}
 
+    # Precompile time format patterns
+    month = r"Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec"
+    time_patterns: List[Tuple[str, re.Pattern]] = [
+        ("YYYY", re.compile(r"^\d{4}$")),
+        ("YYYY-YY", re.compile(r"^\d{4}-\d{2}$")),
+        ("MMM-YYYY", re.compile(fr"^(?:{month})-\d{{4}}$", re.IGNORECASE)),
+        ("MMM-MMM, YYYY", re.compile(fr"^(?:{month})-(?:{month}),\s*\d{{4}}$", re.IGNORECASE)),
+    ]
+
     for col in df.columns:
         role = role_selection.get(col, "Others")
         nulls = int(df[col].isna().sum())
@@ -230,6 +274,39 @@ def validate_dataframe_by_roles(
         if not_null_req and nulls > 0:
             passed = False
             reasons.append("No Nulls allowed")
+
+        # Extra rule: Time columns must match one of the allowed formats and be consistent
+        if role == "Time":
+            series = df[col]
+            # Consider only non-null string values for format checking
+            non_null_vals = series[~series.isna()].astype("string").dropna()
+            formats_seen: List[str] = []
+            invalid_count = 0
+            for val in non_null_vals:
+                v = str(val).strip()
+                if v == "":
+                    # empty strings count as invalid
+                    invalid_count += 1
+                    continue
+                fmt_matched: Optional[str] = None
+                for label, pat in time_patterns:
+                    if pat.match(v):
+                        fmt_matched = label
+                        break
+                if fmt_matched is None:
+                    invalid_count += 1
+                else:
+                    formats_seen.append(fmt_matched)
+
+            if invalid_count > 0:
+                passed = False
+                reasons.append("Invalid time format; allowed: 'YYYY', 'YYYY-YY', 'MMM-YYYY', 'MMM-MMM, YYYY' ")
+            elif len(formats_seen) > 0:
+                first_fmt = formats_seen[0]
+                # If more than one distinct format observed, mark inconsistent
+                if any(f != first_fmt for f in formats_seen[1:]):
+                    passed = False
+                    reasons.append("Inconsistent time formats across rows")
 
         if not passed:
             failed_columns.append(col)
