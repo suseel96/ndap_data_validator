@@ -562,8 +562,8 @@ async def upload(
             csv_bytes = data
 
         folder = (s3_folder_name or "").strip()
-        if folder and not folder.endswith("/"):
-            folder = folder + "/"
+        if folder:
+            folder = folder + "/pending/" 
         key = f"{folder}{object_key_name}" if folder else object_key_name
         s3_uri = uploader.upload_bytes(
             bucket=s3_bucket,
@@ -594,7 +594,7 @@ async def upload(
         if base and dag:
             base = _ensure_url_scheme(base)
             conf_obj = {
-                "source_code": (s3_folder_name or "").strip(),
+                "source_code": (s3_folder_name or "").strip().strip("/pending/"),
                 "arg1": "yes" if is_incremental == "on" else "no",
                 "arg2": "yes" if schema_exists == "on" else "no",
                 "s3_uri": s3_uri,
