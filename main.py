@@ -6,6 +6,9 @@ import traceback
 from typing import Dict, List, Tuple
 import os
 from uuid import uuid4
+import base64
+import json as _json
+from urllib.parse import urlparse, urlunparse, quote, urlencode
 
 import pandas as pd
 from fastapi import FastAPI, File, Form, Request, UploadFile
@@ -82,6 +85,64 @@ def _get_meta(token: str) -> Dict[str, object]:
         except Exception:
             pass
     return {"file_name": file_name, "record_count": record_count}
+
+def _ensure_url_scheme(url: str, default: str = "http") -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme:
+        return url
+    return f"{default}://{url}"
+
+def _add_basic_auth_to_url(url: str, username: str | None, password: str | None) -> str:
+    if not url or not username:
+        return url
+    parsed = urlparse(url)
+    netloc = parsed.netloc
+    if not netloc:
+        return url
+    userinfo = quote(username)
+    if password:
+        userinfo += ":" + quote(password)
+    if "@" in netloc:
+        netloc = netloc.split("@", 1)[-1]
+    parsed = parsed._replace(netloc=f"{userinfo}@{netloc}")
+    return urlunparse(parsed)
+
+
+    if "@" in netloc:
+        netloc = netloc.split("@", 1)[-1]
+    new_netloc = f"{userinfo}@{netloc}"
+    parsed = parsed._replace(netloc=new_netloc)
+    return urlunparse(parsed)
+
+
+def trigger_airflow_dag(base_url: str, dag_id: str, username: str | None = None, password: str | None = None, conf: dict | None = None) -> tuple[bool, dict]:
+    try:
+        import urllib.request
+        import urllib.error
+    except Exception:
+        return False, {"error": "urllib not available"}
+    if not base_url or not dag_id:
+        return False, {"error": "Base URL and DAG ID are required"}
+    url = f"{base_url.rstrip('/')}/api/v1/dags/{dag_id}/dagRuns"
+    payload = {"conf": conf or {}}
+    data = _json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url=url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    if username:
+        token = base64.b64encode(f"{username}:{password or ''}".encode("utf-8")).decode("ascii")
+        req.add_header("Authorization", f"Basic {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8")
+            try:
+                j = _json.loads(body)
+            except Exception:
+                j = {"raw": body}
+            return True, j
+    except Exception as e:
+        return False, {"error": str(e)}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -400,6 +461,19 @@ async def upload_get(request: Request, token: str | None = None):
         STEP_COMPLETION[token] = set()
     STEP_COMPLETION[token].add(3)
 
+    # Check required settings for Step 4
+    s3_bucket_cfg = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
+    airflow_base_cfg = (DB.get_setting("NDAP_AIRFLOW_URL") or os.environ.get("NDAP_AIRFLOW_URL") or "").strip()
+    airflow_dag_cfg = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
+    missing_settings = []
+    if not s3_bucket_cfg:
+        missing_settings.append("S3_BUCKET")
+    if not airflow_base_cfg:
+        missing_settings.append("NDAP_AIRFLOW_URL")
+    if not airflow_dag_cfg:
+        missing_settings.append("loading_dag_id/NDAP_AIRFLOW_DAG_ID")
+    settings_ready = len(missing_settings) == 0
+
     return templates.TemplateResponse(
         "s3_upload.html",
         {
@@ -411,6 +485,8 @@ async def upload_get(request: Request, token: str | None = None):
             "time_date_only": state.get("time_date_only", False),
             "file_name": _get_meta(token).get("file_name", ""),
             "record_count": _get_meta(token).get("record_count", 0),
+            "settings_ready": settings_ready,
+            "missing_settings": missing_settings,
             "active_step": 4,
             "title": "Upload",
             "completed_steps": STEP_COMPLETION.get(token, set()),
@@ -424,14 +500,12 @@ async def upload(
     token: str = Form(...),
     columns: str = Form(...),
     upload_cleaned: str | None = Form(None),
-    bucket: str = Form(...),
     object_key_name: str = Form(...),
-    prefix: str = Form(""),
-    creds_mode: str = Form("Use environment"),
-    access_key: str | None = Form(None),
-    secret_key: str | None = Form(None),
-    region_name: str | None = Form("us-east-1"),
     time_date_only: str | None = Form(None),
+    # Airflow parameters (simple)
+    s3_folder_name: str | None = Form(None),
+    is_incremental: str | None = Form(None),
+    schema_exists: str | None = Form(None),
 ):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
@@ -459,21 +533,40 @@ async def upload(
             time_date_only=(time_date_only == "on"),
         )
 
-        uploader = S3Uploader(
-            mode=S3CredentialsMode(creds_mode),
-            access_key_id=access_key or None,
-            secret_access_key=secret_key or None,
-            region_name=region_name or None,
-        )
+        # Resolve S3 settings from Admin → Settings or environment
+        s3_bucket = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
+        s3_access_key_id = (DB.get_setting("S3_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID") or "").strip()
+        s3_secret_key = (DB.get_setting("S3_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or "").strip()
+        s3_region = (os.environ.get("AWS_REGION") or "us-east-1").strip()
+        if not s3_bucket:
+            return templates.TemplateResponse(
+                "upload.html",
+                {"request": request, "error": "S3 bucket is not configured. Please set it in Admin → Settings."},
+            )
+        if s3_access_key_id and s3_secret_key:
+            uploader = S3Uploader(
+                mode=S3CredentialsMode.Manual,
+                access_key_id=s3_access_key_id,
+                secret_access_key=s3_secret_key,
+                region_name=s3_region,
+            )
+        else:
+            uploader = S3Uploader(
+                mode=S3CredentialsMode.Environment,
+                region_name=s3_region,
+            )
 
         if upload_cleaned == "on":
             csv_bytes = cleaned_df.to_csv(index=False).encode("utf-8")
         else:
             csv_bytes = data
 
-        key = f"{prefix}{object_key_name}" if prefix else object_key_name
+        folder = (s3_folder_name or "").strip()
+        if folder and not folder.endswith("/"):
+            folder = folder + "/"
+        key = f"{folder}{object_key_name}" if folder else object_key_name
         s3_uri = uploader.upload_bytes(
-            bucket=bucket,
+            bucket=s3_bucket,
             key=key,
             data_bytes=csv_bytes,
             content_type="text/csv",
@@ -484,12 +577,65 @@ async def upload(
             STEP_COMPLETION[token] = set()
         STEP_COMPLETION[token].add(3)
 
+        # Optionally trigger Airflow DAG
+        airflow_triggered = False
+        airflow_dag_run_id = None
+        airflow_embed_url = None
+        airflow_run_url = None
+        airflow_error = None
+        airflow_dag_id_val = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "")
+        # Always attempt to trigger using saved settings if available
+        base = (os.environ.get("NDAP_AIRFLOW_URL") or (DB.get_setting("NDAP_AIRFLOW_URL") or "")).strip()
+        base = _ensure_url_scheme(base)
+        dag = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
+        usr = (os.environ.get("NDAP_AIRFLOW_USER") or (DB.get_setting("NDAP_AIRFLOW_USER") or "")).strip()
+        pwd = (os.environ.get("NDAP_AIRFLOW_PASSWORD") or (DB.get_setting("NDAP_AIRFLOW_PASSWORD") or "")).strip()
+        base = _ensure_url_scheme(base)
+        if base and dag:
+            base = _ensure_url_scheme(base)
+            conf_obj = {
+                "source_code": (s3_folder_name or "").strip(),
+                "arg1": "yes" if is_incremental == "on" else "no",
+                "arg2": "yes" if schema_exists == "on" else "no",
+                "s3_uri": s3_uri,
+                "token": token,
+            }
+            ok, info = trigger_airflow_dag(base, dag, username=usr or None, password=pwd or None, conf=conf_obj)
+            airflow_triggered = ok
+            if ok:
+                airflow_dag_run_id = info.get("dag_run_id") if isinstance(info, dict) else None
+                v = "grid"
+                query_params: List[Tuple[str, str]] = [("tab", "graph")]
+                if airflow_dag_run_id:
+                    # Ensure the run id remains percent-encoded when passed to Airflow links
+                    query_params.append(("dag_run_id", airflow_dag_run_id))
+                query = urlencode(query_params, quote_via=quote)
+                run_path = f"/dags/{dag}/{v}"
+                if query:
+                    run_path = f"{run_path}?{query}"
+                embed_base = _add_basic_auth_to_url(base, usr or None, pwd or None)
+                airflow_run_url = f"{base.rstrip('/')}{run_path}"
+                airflow_embed_url = f"{embed_base.rstrip('/')}{run_path}"
+            else:
+                if isinstance(info, dict):
+                    airflow_error = info.get("error") or info.get("message") or info.get("raw")
+                else:
+                    airflow_error = str(info)
+        else:
+            airflow_error = "Airflow URL or DAG ID is not configured."
+
         resp = templates.TemplateResponse(
             "result.html",
             {
                 "request": request,
                 "success": True,
                 "s3_uri": s3_uri,
+                "airflow_triggered": airflow_triggered,
+                "airflow_dag_id": airflow_dag_id_val,
+                "airflow_dag_run_id": airflow_dag_run_id,
+                "airflow_embed_url": airflow_embed_url,
+                "airflow_run_url": airflow_run_url,
+                "airflow_error": airflow_error,
                 "file_name": _get_meta(token).get("file_name", ""),
                 "record_count": _get_meta(token).get("record_count", 0),
                 "active_step": 4,
@@ -659,6 +805,7 @@ async def airflow(request: Request, url: str | None = None):
         },
     )
 
+
 @app.get("/airflow/dag/{dag_id}", response_class=HTMLResponse)
 async def airflow_dag(
     request: Request,
@@ -689,3 +836,46 @@ async def airflow_dag(
             "show_stepper": False,
         },
     )
+
+
+@app.get("/admin/settings", response_class=HTMLResponse)
+async def admin_settings_get(request: Request):
+    if not require_login(request):
+        return RedirectResponse(url="/login", status_code=302)
+    if not require_admin(request):
+        return RedirectResponse(url="/", status_code=302)
+    keys = ["NDAP_AIRFLOW_URL","NDAP_AIRFLOW_USER","NDAP_AIRFLOW_PASSWORD","NDAP_AIRFLOW_DAG_ID","loading_dag_id","S3_BUCKET","S3_ACCESS_KEY_ID","S3_SECRET_ACCESS_KEY"]
+    try:
+        settings = DB.get_settings(keys)
+    except Exception:
+        settings = {k: "" for k in keys}
+    saved = True if request.query_params.get("saved") == "1" else False
+    return templates.TemplateResponse("admin_settings.html", {"request": request, "title": "Settings", "settings": settings, "show_stepper": False, "saved": saved})
+
+
+@app.post("/admin/settings/save")
+async def admin_settings_save(
+    request: Request,
+    NDAP_AIRFLOW_URL: str = Form(""),
+    NDAP_AIRFLOW_USER: str = Form(""),
+    NDAP_AIRFLOW_PASSWORD: str = Form(""),
+    NDAP_AIRFLOW_DAG_ID: str = Form(""),
+    loading_dag_id: str = Form(""),
+    S3_BUCKET: str = Form(""),
+    S3_ACCESS_KEY_ID: str = Form(""),
+    S3_SECRET_ACCESS_KEY: str = Form(""),
+):
+    if not require_login(request) or not require_admin(request):
+        return RedirectResponse(url="/login", status_code=302)
+    try:
+        DB.set_setting("NDAP_AIRFLOW_URL", NDAP_AIRFLOW_URL)
+        DB.set_setting("NDAP_AIRFLOW_USER", NDAP_AIRFLOW_USER)
+        DB.set_setting("NDAP_AIRFLOW_PASSWORD", NDAP_AIRFLOW_PASSWORD)
+        DB.set_setting("NDAP_AIRFLOW_DAG_ID", NDAP_AIRFLOW_DAG_ID)
+        DB.set_setting("loading_dag_id", loading_dag_id)
+        DB.set_setting("S3_BUCKET", S3_BUCKET)
+        DB.set_setting("S3_ACCESS_KEY_ID", S3_ACCESS_KEY_ID)
+        DB.set_setting("S3_SECRET_ACCESS_KEY", S3_SECRET_ACCESS_KEY)
+    except Exception:
+        pass
+    return RedirectResponse(url="/admin/settings?saved=1", status_code=303)

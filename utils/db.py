@@ -86,6 +86,14 @@ class Database:
                 );
                 """
             )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                  key TEXT PRIMARY KEY,
+                  value TEXT
+                );
+                """
+            )
         finally:
             con.close()
 
@@ -325,3 +333,31 @@ class Database:
             con.close()
 
 
+
+    # Settings helpers
+    def set_setting(self, key: str, value: Optional[str]) -> None:
+        con = self.connect()
+        try:
+            con.execute("DELETE FROM app_settings WHERE key = ?", [key])
+            con.execute("INSERT INTO app_settings (key, value) VALUES (?, ?)", [key, value or ""])
+        finally:
+            con.close()
+
+    def get_setting(self, key: str) -> Optional[str]:
+        con = self.connect()
+        try:
+            row = con.execute("SELECT value FROM app_settings WHERE key = ?", [key]).fetchone()
+            return row[0] if row else None
+        finally:
+            con.close()
+
+    def get_settings(self, keys: list[str]) -> Dict[str, Optional[str]]:
+        result: Dict[str, Optional[str]] = {}
+        con = self.connect()
+        try:
+            for k in keys:
+                row = con.execute("SELECT value FROM app_settings WHERE key = ?", [k]).fetchone()
+                result[k] = row[0] if row else None
+            return result
+        finally:
+            con.close()
