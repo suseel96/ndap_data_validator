@@ -36,7 +36,6 @@
           <thead>
             <tr>
               <th>Time</th>
-              <th>Token</th>
               <th>Filename</th>
               <th>Bucket</th>
               <th>Key</th>
@@ -47,7 +46,6 @@
             {% for r in upload_logs %}
               <tr>
                 <td>{{ r.created_at }}</td>
-                <td><code>{{ r.token }}</code></td>
                 <td>{{ r.filename or '' }}</td>
                 <td>{{ r.bucket }}</td>
                 <td><code>{{ r.object_key }}</code></td>

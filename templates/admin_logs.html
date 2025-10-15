@@ -49,7 +49,6 @@
             <tr>
               <th>Time</th>
               <th>User</th>
-              <th>Token</th>
               <th>Filename</th>
               <th>Bucket</th>
               <th>Key</th>
@@ -61,7 +60,6 @@
               <tr>
                 <td>{{ r.created_at }}</td>
                 <td>{{ r.username }}</td>
-                <td><code>{{ r.token }}</code></td>
                 <td>{{ r.filename or '' }}</td>
                 <td>{{ r.bucket }}</td>
                 <td><code>{{ r.object_key }}</code></td>
