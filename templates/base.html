@@ -15,11 +15,10 @@
             <span class="me-2">Signed in as <strong>{{ request.session.get('username') }}</strong></span>
             {% if request.session.get('is_admin') %}
               <a class="btn btn-sm btn-outline-primary me-2" href="/admin/users">Admin Panel</a>
-              <a class="btn btn-sm btn-outline-primary me-2" href="/admin/logs">Logs</a>
+              <a class="btn btn-sm btn-outline-primary me-2" href="/admin/logs">Logs</a> <a class="btn btn-sm btn-outline-primary me-2" href="/admin/settings">Settings</a>
             {% endif %}
             <a class="btn btn-sm btn-outline-primary me-2" href="/">Upload New File</a>
             <a class="btn btn-sm btn-outline-primary me-2" href="/logs">My Logs</a>
-            <a class="btn btn-sm btn-outline-primary me-2" href="/airflow">Airflow</a>
             <a class="btn btn-sm btn-primary" href="/logout">Logout</a>
           {% else %}
             {% if request.url.path != '/login' %}

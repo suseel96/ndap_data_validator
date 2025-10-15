@@ -4,7 +4,25 @@
   <h4 class="mb-3">Step 4: Upload to AWS S3 {% if file_name %}<span class="text-muted">— {{ file_name }} ({{ record_count }} records)</span>{% endif %}</h4>
   {% if success %}
     <div class="alert alert-success">Uploaded successfully to <code>{{ s3_uri }}</code></div>
-    <a href="/" class="btn btn-outline-primary">Start over</a>
+    {% if airflow_triggered %}
+      <div class="alert alert-info">
+        Airflow DAG <strong>{{ airflow_dag_id }}</strong> triggered.
+        {% if airflow_dag_run_id %}Run ID: <code>{{ airflow_dag_run_id }}</code>.{% endif %}
+        {% if airflow_run_url %}
+          <a class="btn btn-sm btn-outline-primary ms-2" href="{{ airflow_run_url }}" target="_blank" rel="noreferrer">Open in Airflow</a>
+        {% endif %}
+      </div>
+      {% if airflow_embed_url %}
+        <div class="ratio ratio-16x9" style="min-height: 70vh;">
+          <iframe src="{{ airflow_embed_url }}" title="Airflow" style="border:0; width:100%; height:100%;"></iframe>
+        </div>
+      {% endif %}
+    {% elif airflow_error %}
+      <div class="alert alert-warning">
+        Airflow trigger failed: {{ airflow_error }}.
+      </div>
+    {% endif %}
+    <a href="/" class="btn btn-outline-primary mt-3">Start over</a>
   {% else %}
     <div class="alert alert-danger">Upload failed: {{ error }}</div>
     {% if trace %}<pre class="small">{{ trace }}</pre>{% endif %}

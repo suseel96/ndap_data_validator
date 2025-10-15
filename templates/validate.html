@@ -1,44 +1,44 @@
-{% extends "base.html" %}
-
-{% block content %}
-  <h4 class="mb-3">Step 3: Perform validations {% if file_name %}<span class="text-muted">— {{ file_name }} ({{ record_count }} records)</span>{% endif %}</h4>
-
-    <div class="table-scroll mt-3"><table class="table table-sm table-validation">
-      <thead>
-        <tr>
-          <th>Column Name</th>
-          <th>Column Type</th>
-          <th>Nulls</th>
-          <th>Conversion errors</th>
-          <th>Passed</th>
-          <th>Reasons</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for r in rows %}
+{% extends "base.html" %}
+
+{% block content %}
+  <h4 class="mb-3">Step 3: Perform validations {% if file_name %}<span class="text-muted">&mdash; {{ file_name }} ({{ record_count }} records)</span>{% endif %}</h4>
+
+    <div class="table-scroll mt-3"><table class="table table-sm table-validation">
+      <thead>
+        <tr>
+          <th>Column Name</th>
+          <th>Column Type</th>
+          <th>Nulls</th>
+          <th>Conversion errors</th>
+          <th>Passed</th>
+          <th>Reasons</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
           <tr class="{{ 'row-pass' if r.passed else 'row-fail' }}">
-            <td>{{ r.column }}</td>
-            <td>{{ r.role }}</td>
-            <td>{{ r.nulls }}</td>
-            <td>{{ r.conversion_errors }}</td>
-            <td>{{ 'Yes' if r.passed else 'No' }}</td>
-            <td>{{ r.reasons }}</td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table></div>
-
-    {% if passed %}
-      <div class="alert alert-success d-flex align-items-center justify-content-between">
-        <div>All checks passed. Proceed to the next step to upload to S3.</div>
-        <a class="btn btn-primary" href="/upload?token={{ token }}">Proceed to upload</a>
-      </div>
-    {% else %}
-      <div class="alert alert-danger">Validation failed. Go back to Step 2 to adjust column roles and try again.</div>
-    {% endif %}
-
-    <script></script>
-{% endblock %}
-
-
-
+            <td>{{ r.column }}</td>
+            <td>{{ r.role }}</td>
+            <td>{{ r.nulls }}</td>
+            <td>{{ r.conversion_errors }}</td>
+            <td>{{ 'Yes' if r.passed else 'No' }}</td>
+            <td>{{ r.reasons }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+
+    {% if passed %}
+      <div class="alert alert-success d-flex align-items-center justify-content-between">
+        <div>All checks passed. Proceed to the next step to upload to S3.</div>
+        <a class="btn btn-primary" href="/upload?token={{ token }}">Proceed to upload</a>
+      </div>
+    {% else %}
+      <div class="alert alert-danger">Validation failed. Go back to Step 2 to adjust column roles and try again.</div>
+    {% endif %}
+
+    <script></script>
+{% endblock %}
+
+
+

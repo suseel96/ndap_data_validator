@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block content %}
+  {% if saved %}
+    <div class="alert alert-success">Settings saved successfully.</div>
+  {% endif %}
+  <div class="page-header d-flex align-items-center justify-content-between mb-3">
+    <h4 class="m-0">Admin: Settings</h4>
+  </div>
+
+  <div class="card p-3 card-narrow">
+    <form method="post" action="/admin/settings/save">
+      <div class="mb-3">
+        <label class="form-label">NDAP_AIRFLOW_URL</label>
+        <input class="form-control" type="text" name="NDAP_AIRFLOW_URL" value="{{ settings.get('NDAP_AIRFLOW_URL','') }}" placeholder="http://127.0.0.1:8080" />
+      </div>
+      <div class="mb-3">
+        <label class="form-label">loading_dag_id</label>
+        <input class="form-control" type="text" name="loading_dag_id" value="{{ settings.get('loading_dag_id','') }}" placeholder="my_loading_dag" />
+      </div>
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label">NDAP_AIRFLOW_USER</label>
+          <input class="form-control" type="text" name="NDAP_AIRFLOW_USER" value="{{ settings.get('NDAP_AIRFLOW_USER','') }}" />
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">NDAP_AIRFLOW_PASSWORD</label>
+          <input class="form-control" type="password" name="NDAP_AIRFLOW_PASSWORD" value="{{ settings.get('NDAP_AIRFLOW_PASSWORD','') }}" />
+        </div>
+      </div>
+      <hr class="my-3" />
+      <h6 class="mb-2">S3 Settings</h6>
+      <div class="row g-3">
+        <div class="col-md-4">
+          <label class="form-label">S3 Bucket</label>
+          <input class="form-control" type="text" name="S3_BUCKET" value="{{ settings.get('S3_BUCKET','') }}" />
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">S3 Access Key ID</label>
+          <input class="form-control" type="text" name="S3_ACCESS_KEY_ID" value="{{ settings.get('S3_ACCESS_KEY_ID','') }}" />
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">S3 Secret Access Key</label>
+          <input class="form-control" type="password" name="S3_SECRET_ACCESS_KEY" value="{{ settings.get('S3_SECRET_ACCESS_KEY','') }}" />
+        </div>
+      </div>
+      <div class="mt-3">
+        <button class="btn btn-primary" type="submit">Save Settings</button>
+      </div>
+    </form>
+  </div>
+{% endblock %}
