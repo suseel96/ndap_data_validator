@@ -32,6 +32,7 @@
 
     <hr class="my-4" />
     <h6 class="mb-2">Airflow Parameters</h6>
+    {% if not settings_ready %}<fieldset disabled>{% endif %}
     <div class="row g-3">
       <div class="col-md-4">
         <label class="form-label">S3 folder name</label>
@@ -51,7 +52,7 @@
       </div>
     </div>
 
-    {% if not settings_ready %}</fieldset>{% endif %}
+    {% if not settings_ready %}</fieldset disabled>{% endif %}
     <button class="btn btn-primary mt-3" type="submit">Upload to S3</button>
   </form>
 {% endblock %}
