@@ -12,9 +12,14 @@
           <a class="btn btn-sm btn-outline-primary ms-2" href="{{ airflow_run_url }}" target="_blank" rel="noreferrer">Open in Airflow</a>
         {% endif %}
       </div>
-      {% if airflow_embed_url %}
-        <div class="ratio ratio-16x9" style="min-height: 70vh;">
-          <iframe src="{{ airflow_embed_url }}" title="Airflow" style="border:0; width:100%; height:100%;"></iframe>
+      {% if airflow_dag_run_id %}
+        <div class="card mt-3" id="airflow-status-card" data-dag-id="{{ airflow_dag_id }}" data-run-id="{{ airflow_dag_run_id }}">
+          <div class="card-header">Airflow Run Status</div>
+          <div class="card-body">
+            <div id="airflow-status-message" data-role="message" class="mb-2 text-muted">Checking Airflow run status…</div>
+            <div id="airflow-status-error" data-role="tasks-error" class="text-warning small mb-2" style="display:none;"></div>
+            <div id="airflow-status-tasks" data-role="tasks" class="small"></div>
+          </div>
         </div>
       {% endif %}
     {% elif airflow_error %}
@@ -28,7 +33,90 @@
     {% if trace %}<pre class="small">{{ trace }}</pre>{% endif %}
     <a href="/" class="btn btn-outline-secondary">Go back</a>
   {% endif %}
+{% if airflow_triggered and airflow_dag_run_id and airflow_dag_id %}
+  <script>
+    (function () {
+      const card = document.getElementById('airflow-status-card');
+      if (!card) {
+        return;
+      }
+      const dagId = card.getAttribute('data-dag-id');
+      const runId = card.getAttribute('data-run-id');
+      const messageEl = card.querySelector('[data-role="message"]');
+      const tasksEl = card.querySelector('[data-role="tasks"]');
+      const errorEl = card.querySelector('[data-role="tasks-error"]');
+      const normalizeLog = (value) => {
+        let text = String(value || '');
+        text = text.replace(/\r\n/g, '\n');
+        text = text.replace(/\\r\\n/g, '\n');
+        text = text.replace(/\\n/g, '\n');
+        text = text.replace(/\\t/g, '\t');
+        return text;
+      };
+      const escapeHtml = (value) => String(value || '').replace(/[&<>"']/g, (ch) => {
+        const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+        return map[ch] || ch;
+      });
+      let polling = true;
+
+      async function pollStatus() {
+        if (!polling) {
+          return;
+        }
+        try {
+          const resp = await fetch(`/airflow/run-status?dag_id=${encodeURIComponent(dagId)}&dag_run_id=${encodeURIComponent(runId)}`);
+          if (!resp.ok) {
+            messageEl.textContent = `Unable to fetch Airflow status (HTTP ${resp.status}).`;
+            polling = false;
+            return;
+          }
+          const data = await resp.json();
+          messageEl.textContent = data.state ? `Current state: ${data.state}` : 'State is not available yet.';
+
+          if (data.tasks_error) {
+            errorEl.style.display = '';
+            errorEl.textContent = `Task details unavailable: ${data.tasks_error}`;
+          } else {
+            errorEl.style.display = 'none';
+            errorEl.textContent = '';
+          }
+
+          if (Array.isArray(data.tasks) && data.tasks.length) {
+            tasksEl.innerHTML = data.tasks.map((task) => {
+              const state = (task.state || 'unknown').toLowerCase();
+              const badgeClass = state === 'success'
+                ? 'bg-success'
+                : state === 'failed'
+                ? 'bg-danger'
+                : state === 'running'
+                ? 'bg-warning text-dark'
+                : 'bg-secondary';
+              const header = `<strong>${escapeHtml(task.task_id || 'unknown')}</strong> <span class="badge ${badgeClass} ms-2">${escapeHtml(task.state || 'unknown')}</span>`;
+              const logText = normalizeLog(task.log || 'No log content yet.');
+              const meta = [
+                task.start_date ? `Started: ${escapeHtml(task.start_date)}` : '',
+                task.end_date ? `Ended: ${escapeHtml(task.end_date)}` : ''
+              ].filter(Boolean).join(' | ');
+              const metaHtml = meta ? `<div class="text-muted mb-1">${meta}</div>` : '';
+              return `<details class="mb-2"><summary>${header}</summary>${metaHtml}<pre class="bg-light p-2 rounded">${escapeHtml(logText)}</pre></details>`;
+            }).join('');
+          } else {
+            tasksEl.innerHTML = '<p class="text-muted mb-0">No task updates yet.</p>';
+          }
+
+          if (!data.complete) {
+            setTimeout(pollStatus, 5000);
+          } else {
+            polling = false;
+          }
+        } catch (err) {
+          messageEl.textContent = 'Error fetching Airflow status.';
+          polling = false;
+        }
+      }
+
+      pollStatus();
+    })();
+  </script>
+{% endif %}
 {% endblock %}
-
-
-
