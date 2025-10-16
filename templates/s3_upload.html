@@ -14,10 +14,7 @@
   {% endif %}
   <form method="post" action="/upload" class="mt-3">
     <input type="hidden" name="token" value="{{ token }}" />
-    <input type="hidden" name="columns" value="{{ '|||' . join(columns) }}" />
-    <input type="hidden" name="time_date_only" value="" />
-
-    {% for col in columns %}
+    <input type="hidden" name="columns" value="{{ '|||' . join(columns) }}" />{% for col in columns %}
       <input type="hidden" name="role_{{ col }}" value="{{ role_selection[col] }}" />
     {% endfor %}
 
@@ -42,3 +39,5 @@
     <button class="btn btn-primary mt-3" type="submit">Upload to S3</button>
   </form>
 {% endblock %}
+
+

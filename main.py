@@ -586,7 +586,6 @@ async def upload(
             df,
             role_selection,
             measure_type_selection,
-            time_date_only=False,
         )
 
         if not s3_bucket:
@@ -637,7 +636,15 @@ async def upload(
         }
 
         try:
-            DB.log_upload(token, get_username(request), s3_bucket, key, s3_uri, True)
+            DB.log_upload(
+                token,
+                get_username(request),
+                s3_bucket,
+                key,
+                s3_uri,
+                status="Success",
+                comments="Upload completed",
+            )
         except Exception:
             pass
 
@@ -797,11 +804,24 @@ async def airflow_trigger_post(
         airflow_run_url = f"{airflow_base.rstrip('/')}{run_path}"
         airflow_embed_url = f"{embed_base.rstrip('/')}{run_path}"
         STEP_COMPLETION[token].add(5)
+        try:
+            DB.update_upload_airflow(
+                token,
+                dag_status="Triggered",
+                dag_run_id=airflow_dag_run_id,
+                comments="",
+            )
+        except Exception:
+            pass
     else:
         if isinstance(info, dict):
             airflow_error = info.get("error") or info.get("message") or info.get("raw")
         else:
             airflow_error = str(info)
+        try:
+            DB.update_upload_airflow(token, dag_status="Failed", comments=airflow_error or "")
+        except Exception:
+            pass
         return _render_trigger_with_error(airflow_error or "Failed to trigger Airflow DAG.")
 
     meta = _get_meta(token)
@@ -872,10 +892,16 @@ async def admin_logs(request: Request, username: str | None = None):
         return RedirectResponse(url="/login", status_code=302)
     if not require_admin(request):
         return RedirectResponse(url="/", status_code=302)
-    validation_logs = DB.list_validation_logs(username=username or None)
-    upload_logs = DB.list_upload_logs(username=username or None)
+    pipeline_logs = DB.list_pipeline_logs(username=username or None)
     return templates.TemplateResponse(
-        "admin_logs.html", {"request": request, "title": "Logs", "validation_logs": validation_logs, "upload_logs": upload_logs, "filter_username": username or "", "show_stepper": False},
+        "admin_logs.html",
+        {
+            "request": request,
+            "title": "Logs",
+            "pipeline_logs": pipeline_logs,
+            "filter_username": username or "",
+            "show_stepper": False,
+        },
     )
 
 
@@ -884,10 +910,15 @@ async def user_logs(request: Request):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
     username = get_username(request)
-    validation_logs = DB.list_validation_logs(username=username)
-    upload_logs = DB.list_upload_logs(username=username)
+    pipeline_logs = DB.list_pipeline_logs(username=username)
     return templates.TemplateResponse(
-        "user_logs.html", {"request": request, "title": "My Logs", "validation_logs": validation_logs, "upload_logs": upload_logs, "show_stepper": False},
+        "user_logs.html",
+        {
+            "request": request,
+            "title": "My Logs",
+            "pipeline_logs": pipeline_logs,
+            "show_stepper": False,
+        },
     )
 
 
@@ -970,6 +1001,7 @@ async def airflow(request: Request, url: str | None = None):
 async def airflow_run_status(request: Request, dag_id: str, dag_run_id: str):
     if not require_login(request):
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    token_param = request.query_params.get("token")
     dag_id = (dag_id or "").strip()
     dag_run_id = (dag_run_id or "").strip()
     if not dag_id or not dag_run_id:
@@ -1027,8 +1059,20 @@ async def airflow_run_status(request: Request, dag_id: str, dag_run_id: str):
         if not tasks_success:
             payload["tasks_error"] = tasks_info
     payload["tasks"] = tasks
+    payload["dag_run_id"] = dag_run_id
     if source_code:
         payload["source_code"] = source_code
+    if token_param:
+        try:
+            status_label = state.title() if state else None
+            DB.update_upload_airflow(
+                token_param,
+                dag_status=status_label,
+                dag_run_id=dag_run_id,
+                source_code=source_code if source_code else None,
+            )
+        except Exception:
+            pass
     return JSONResponse(payload)
 
 
@@ -1105,3 +1149,15 @@ async def admin_settings_save(
     except Exception:
         pass
     return RedirectResponse(url="/admin/settings?saved=1", status_code=303)
+
+
+
+
+
+
+
+
+
+
+
+
