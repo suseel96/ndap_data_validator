@@ -9,6 +9,7 @@ from uuid import uuid4
 import base64
 import json as _json
 from urllib.parse import urlparse, urlunparse, quote, urlencode
+import re
 import urllib.request
 import urllib.error
 
@@ -989,6 +990,7 @@ async def airflow_run_status(request: Request, dag_id: str, dag_run_id: str):
         base, f"/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances", username, password
     )
     tasks: List[Dict[str, object]] = []
+    source_code: str | None = None
     if tasks_success and isinstance(tasks_info, dict):
         for task in tasks_info.get("task_instances", [])[:15]:
             task_id = task.get("task_id")
@@ -1008,6 +1010,10 @@ async def airflow_run_status(request: Request, dag_id: str, dag_run_id: str):
                     log_snippet = log_info[-TASK_LOG_SNIPPET_LIMIT:]
                 else:
                     log_snippet = f"(log unavailable: {log_info})" if log_info else "(log unavailable)"
+                if log_snippet and source_code is None:
+                    match = re.search(r"New source code generated:\s*(\d+)", log_snippet)
+                    if match:
+                        source_code = match.group(1)
             tasks.append(
                 {
                     "task_id": task.get("task_id"),
@@ -1021,6 +1027,8 @@ async def airflow_run_status(request: Request, dag_id: str, dag_run_id: str):
         if not tasks_success:
             payload["tasks_error"] = tasks_info
     payload["tasks"] = tasks
+    if source_code:
+        payload["source_code"] = source_code
     return JSONResponse(payload)
 
 
