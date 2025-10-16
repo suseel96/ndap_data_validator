@@ -45,6 +45,7 @@
       const messageEl = card.querySelector('[data-role="message"]');
       const tasksEl = card.querySelector('[data-role="tasks"]');
       const errorEl = card.querySelector('[data-role="tasks-error"]');
+      const capitalizeWords = (value) => String(value || '').replace(/\b\w/g, (ch) => ch.toUpperCase());
       const normalizeLog = (value) => {
         let text = String(value || '');
         text = text.replace(/\r\n/g, '\n');
@@ -71,7 +72,7 @@
             return;
           }
           const data = await resp.json();
-          messageEl.textContent = data.state ? `Current state: ${data.state}` : 'State is not available yet.';
+          messageEl.textContent = data.state ? '' : 'State is not available yet.';
 
           if (data.tasks_error) {
             errorEl.style.display = '';
@@ -91,7 +92,11 @@
                 : state === 'running'
                 ? 'bg-warning text-dark'
                 : 'bg-secondary';
-              const header = `<strong>${escapeHtml(task.task_id || 'unknown')}</strong> <span class="badge ${badgeClass} ms-2">${escapeHtml(task.state || 'unknown')}</span>`;
+              const rawTaskId = task.task_id || 'unknown';
+              const prettyTaskId = capitalizeWords(rawTaskId.replace(/_/g, ' '));
+              const badgeLabel = capitalizeWords(task.state || 'unknown');
+              const headerLabel = data.tasks.length > 1 ? prettyTaskId : 'Status';
+              const header = `<strong>${escapeHtml(headerLabel)}</strong> <span class="badge ${badgeClass} ms-2">${escapeHtml(badgeLabel)}</span>`;
               const logText = normalizeLog(task.log || 'No log content yet.');
               const meta = [
                 task.start_date ? `Started: ${escapeHtml(task.start_date)}` : '',
