@@ -17,6 +17,7 @@
           <div class="card-header">Airflow Run Status</div>
           <div class="card-body">
             <div id="airflow-status-message" data-role="message" class="mb-2 text-muted">Checking Airflow run status…</div>
+            <div class="mb-2"><strong>Source Code:</strong> <span data-role="source-code">N/A</span></div>
             <div id="airflow-status-error" data-role="tasks-error" class="text-warning small mb-2" style="display:none;"></div>
             <div id="airflow-status-tasks" data-role="tasks" class="small"></div>
           </div>
@@ -45,6 +46,7 @@
       const messageEl = card.querySelector('[data-role="message"]');
       const tasksEl = card.querySelector('[data-role="tasks"]');
       const errorEl = card.querySelector('[data-role="tasks-error"]');
+      const sourceEl = card.querySelector('[data-role="source-code"]');
       const capitalizeWords = (value) => String(value || '').replace(/\b\w/g, (ch) => ch.toUpperCase());
       const normalizeLog = (value) => {
         let text = String(value || '');
@@ -68,6 +70,9 @@
           const resp = await fetch(`/airflow/run-status?dag_id=${encodeURIComponent(dagId)}&dag_run_id=${encodeURIComponent(runId)}`);
           if (!resp.ok) {
             messageEl.textContent = `Unable to fetch Airflow status (HTTP ${resp.status}).`;
+            if (sourceEl) {
+              sourceEl.textContent = 'N/A';
+            }
             polling = false;
             return;
           }
@@ -80,6 +85,10 @@
           } else {
             errorEl.style.display = 'none';
             errorEl.textContent = '';
+          }
+          if (sourceEl) {
+            const codeValue = (data.source_code || '').toString().trim();
+            sourceEl.textContent = codeValue ? codeValue : 'N/A';
           }
 
           if (Array.isArray(data.tasks) && data.tasks.length) {
@@ -116,6 +125,9 @@
           }
         } catch (err) {
           messageEl.textContent = 'Error fetching Airflow status.';
+          if (sourceEl) {
+            sourceEl.textContent = 'N/A';
+          }
           polling = false;
         }
       }
