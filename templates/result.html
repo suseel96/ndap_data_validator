@@ -13,7 +13,7 @@
         {% endif %}
       </div>
       {% if airflow_dag_run_id %}
-        <div class="card mt-3" id="airflow-status-card" data-dag-id="{{ airflow_dag_id }}" data-run-id="{{ airflow_dag_run_id }}">
+        <div class="card mt-3" id="airflow-status-card" data-dag-id="{{ airflow_dag_id }}" data-run-id="{{ airflow_dag_run_id }}" data-token="{{ token }}">
           <div class="card-header">Airflow Run Status</div>
           <div class="card-body">
             <div id="airflow-status-message" data-role="message" class="mb-2 text-muted">Checking Airflow run status…</div>
@@ -43,6 +43,7 @@
       }
       const dagId = card.getAttribute('data-dag-id');
       const runId = card.getAttribute('data-run-id');
+      const tokenValue = card.getAttribute('data-token') || '';
       const messageEl = card.querySelector('[data-role="message"]');
       const tasksEl = card.querySelector('[data-role="tasks"]');
       const errorEl = card.querySelector('[data-role="tasks-error"]');
@@ -67,7 +68,11 @@
           return;
         }
         try {
-          const resp = await fetch(`/airflow/run-status?dag_id=${encodeURIComponent(dagId)}&dag_run_id=${encodeURIComponent(runId)}`);
+          const params = new URLSearchParams({ dag_id: dagId, dag_run_id: runId });
+          if (tokenValue) {
+            params.append('token', tokenValue);
+          }
+          const resp = await fetch(`/airflow/run-status?${params.toString()}`);
           if (!resp.ok) {
             messageEl.textContent = `Unable to fetch Airflow status (HTTP ${resp.status}).`;
             if (sourceEl) {
@@ -82,6 +87,9 @@
           if (data.tasks_error) {
             errorEl.style.display = '';
             errorEl.textContent = `Task details unavailable: ${data.tasks_error}`;
+            if (sourceEl) {
+              sourceEl.textContent = 'N/A';
+            }
           } else {
             errorEl.style.display = 'none';
             errorEl.textContent = '';
@@ -137,3 +145,5 @@
   </script>
 {% endif %}
 {% endblock %}
+
+

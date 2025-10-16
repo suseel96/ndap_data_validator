@@ -82,10 +82,20 @@ class Database:
                   object_key TEXT,
                   s3_uri TEXT,
                   cleaned BOOLEAN,
+                  status TEXT,
+                  comments TEXT,
+                  dag_status TEXT,
+                  dag_run_id TEXT,
+                  source_code TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 """
             )
+            con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS status TEXT;")
+            con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS comments TEXT;")
+            con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS dag_status TEXT;")
+            con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS dag_run_id TEXT;")
+            con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS source_code TEXT;")
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS app_settings (
@@ -212,12 +222,41 @@ class Database:
         finally:
             con.close()
 
-    def log_upload(self, token: str, username: Optional[str], bucket: str, object_key: str, s3_uri: str, cleaned: bool) -> None:
+    def log_upload(
+        self,
+        token: str,
+        username: Optional[str],
+        bucket: str,
+        object_key: str,
+        s3_uri: str,
+        status: str,
+        comments: Optional[str] = None,
+        dag_status: Optional[str] = None,
+        dag_run_id: Optional[str] = None,
+        source_code: Optional[str] = None,
+    ) -> None:
         con = self.connect()
         try:
             con.execute(
-                "INSERT INTO upload_logs (id, token, username, bucket, object_key, s3_uri, cleaned) VALUES (hash(now()), ?, ?, ?, ?, ?, ?)",
-                [token, username or "", bucket, object_key, s3_uri, cleaned],
+                """
+                INSERT INTO upload_logs (
+                  id, token, username, bucket, object_key, s3_uri, cleaned, status, comments, dag_status, dag_run_id, source_code
+                )
+                VALUES (hash(now()), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    token,
+                    username or "",
+                    bucket,
+                    object_key,
+                    s3_uri,
+                    False,
+                    status,
+                    comments or "",
+                    dag_status or "",
+                    dag_run_id or "",
+                    source_code or "",
+                ],
             )
         finally:
             con.close()
@@ -307,28 +346,114 @@ class Database:
         finally:
             con.close()
 
-    def list_upload_logs(self, username: Optional[str] = None) -> list[Dict[str, Any]]:
+    def update_upload_airflow(
+        self,
+        token: str,
+        dag_status: Optional[str] = None,
+        dag_run_id: Optional[str] = None,
+        source_code: Optional[str] = None,
+        comments: Optional[str] = None,
+    ) -> None:
         con = self.connect()
         try:
+            updates = []
+            params: list[object] = []
+            if dag_status is not None:
+                updates.append("dag_status = ?")
+                params.append(dag_status)
+            if dag_run_id is not None:
+                updates.append("dag_run_id = ?")
+                params.append(dag_run_id)
+            if source_code is not None:
+                updates.append("source_code = ?")
+                params.append(source_code)
+            if comments is not None:
+                updates.append("comments = ?")
+                params.append(comments)
+            if not updates:
+                return
+            params.append(token)
+            con.execute(f"UPDATE upload_logs SET {', '.join(updates)} WHERE token = ?", params)
+        finally:
+            con.close()
+
+    def list_pipeline_logs(self, username: Optional[str] = None) -> list[Dict[str, Any]]:
+        con = self.connect()
+        try:
+            query = """
+                WITH latest_upload AS (
+                    SELECT *,
+                           ROW_NUMBER() OVER (PARTITION BY token ORDER BY created_at DESC) AS rn
+                    FROM upload_logs
+                ),
+                latest_validation AS (
+                    SELECT *,
+                           ROW_NUMBER() OVER (PARTITION BY token ORDER BY created_at DESC) AS rn
+                    FROM validation_logs
+                ),
+                tokens AS (
+                    SELECT token FROM latest_upload
+                    UNION
+                    SELECT token FROM latest_validation
+                )
+                SELECT
+                    COALESCE(u.created_at, v.created_at, up.created_at) AS event_time,
+                    COALESCE(u.username, v.username, '') AS username,
+                    up.filename,
+                    CASE
+                        WHEN v.token IS NULL THEN 'Not run'
+                        WHEN v.passed THEN 'Success'
+                        ELSE 'Failed'
+                    END AS validation_status,
+                    COALESCE(v.failed_columns, '') AS validation_comments,
+                    CASE
+                        WHEN u.status IS NULL OR u.status = '' THEN 'Not uploaded'
+                        ELSE u.status
+                    END AS upload_status,
+                    COALESCE(u.object_key, '') AS upload_key,
+                    COALESCE(u.comments, '') AS upload_comments,
+                    CASE
+                        WHEN u.dag_status IS NULL OR u.dag_status = '' THEN 'Not triggered'
+                        ELSE u.dag_status
+                    END AS airflow_status,
+                    CASE
+                        WHEN u.source_code IS NULL OR u.source_code = '' THEN 'N/A'
+                        ELSE u.source_code
+                    END AS source_code,
+                    COALESCE(u.dag_run_id, '') AS dag_run_id
+                FROM tokens t
+                LEFT JOIN latest_upload u ON u.token = t.token AND u.rn = 1
+                LEFT JOIN latest_validation v ON v.token = t.token AND v.rn = 1
+                LEFT JOIN uploads up ON up.token = t.token
+                {where_clause}
+                ORDER BY event_time DESC NULLS LAST
+            """
+            where_clause = ""
+            params: list[object] = []
             if username:
-                rows = con.execute(
-                    (
-                        "SELECT l.id, l.token, l.username, l.bucket, l.object_key, l.s3_uri, l.cleaned, l.created_at, u.filename "
-                        "FROM upload_logs l LEFT JOIN uploads u ON l.token = u.token "
-                        "WHERE l.username = ? ORDER BY l.created_at DESC"
-                    ),
-                    [username],
-                ).fetchall()
-            else:
-                rows = con.execute(
-                    (
-                        "SELECT l.id, l.token, l.username, l.bucket, l.object_key, l.s3_uri, l.cleaned, l.created_at, u.filename "
-                        "FROM upload_logs l LEFT JOIN uploads u ON l.token = u.token "
-                        "ORDER BY l.created_at DESC"
-                    )
-                ).fetchall()
-            cols = ["id", "token", "username", "bucket", "object_key", "s3_uri", "cleaned", "created_at", "filename"]
-            return [dict(zip(cols, r)) for r in rows]
+                where_clause = "WHERE COALESCE(u.username, v.username, '') = ?"
+                params.append(username)
+            rows = con.execute(query.format(where_clause=where_clause), params).fetchall()
+            cols = [
+                "event_time",
+                "username",
+                "filename",
+                "validation_status",
+                "validation_comments",
+                "upload_status",
+                "upload_key",
+                "upload_comments",
+                "airflow_status",
+                "source_code",
+                "dag_run_id",
+            ]
+            results = []
+            for row in rows:
+                record = dict(zip(cols, row))
+                if record["event_time"]:
+                    record["event_time"] = str(record["event_time"])
+                results.append(record)
+            return results
         finally:
             con.close()
 
@@ -361,3 +486,5 @@ class Database:
             return result
         finally:
             con.close()
+
+

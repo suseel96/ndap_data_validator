@@ -13,66 +13,51 @@
     </div>
   </form>
 
-  <div class="row g-4">
-    <div class="col-md-6">
-      <div class="card p-3">
-        <h6>Validation logs</h6>
-        <div class="table-scroll mt-2"><table class="table table-sm table-striped">
-          <thead>
+  <div class="card">
+    <div class="card-body p-0">
+      <div class="table-responsive" style="max-height: 70vh; overflow-y: auto;">
+        <table class="table table-sm table-striped mb-0">
+          <thead class="table-light">
             <tr>
               <th>Time</th>
               <th>User</th>
               <th>Filename</th>
-              <th>Passed</th>
-              <th>Failed columns</th>
+              <th>Validation status</th>
+              <th>Validation comments</th>
+              <th>Upload status</th>
+              <th>Upload key</th>
+              <th>Upload comments</th>
+              <th>Airflow DAG status</th>
+              <th>Source code</th>
+              <th>DAG Run ID</th>
             </tr>
           </thead>
           <tbody>
-            {% for r in validation_logs %}
+            {% if pipeline_logs %}
+              {% for row in pipeline_logs %}
+                <tr>
+                  <td>{{ row.event_time or '' }}</td>
+                  <td>{{ row.username or '' }}</td>
+                  <td>{{ row.filename or '' }}</td>
+                  <td>{{ row.validation_status or 'Not run' }}</td>
+                  <td>{{ row.validation_comments or '' }}</td>
+                  <td>{{ row.upload_status or '' }}</td>
+                  <td><code>{{ row.upload_key or '' }}</code></td>
+                  <td>{{ row.upload_comments or '' }}</td>
+                  <td>{{ row.airflow_status or 'Not triggered' }}</td>
+                  <td>{{ row.source_code or 'N/A' }}</td>
+                  <td><code>{{ row.dag_run_id or '' }}</code></td>
+                </tr>
+              {% endfor %}
+            {% else %}
               <tr>
-                <td>{{ r.created_at }}</td>
-                <td>{{ r.username }}</td>
-                <td>{{ r.filename or '' }}</td>
-                <td>{{ 'Yes' if r.passed else 'No' }}</td>
-                <td>{{ r.failed_columns }}</td>
+                <td colspan="11" class="text-center text-muted py-3">No log entries found.</td>
               </tr>
-            {% endfor %}
+            {% endif %}
           </tbody>
-        </table></div>
-      </div>
-    </div>
-    <div class="col-md-6">
-      <div class="card p-3">
-        <h6>Upload logs</h6>
-        <div class="table-scroll mt-2"><table class="table table-sm table-striped">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>User</th>
-              <th>Filename</th>
-              <th>Bucket</th>
-              <th>Key</th>
-              <th>Cleaned</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for r in upload_logs %}
-              <tr>
-                <td>{{ r.created_at }}</td>
-                <td>{{ r.username }}</td>
-                <td>{{ r.filename or '' }}</td>
-                <td>{{ r.bucket }}</td>
-                <td><code>{{ r.object_key }}</code></td>
-                <td>{{ 'Yes' if r.cleaned else 'No' }}</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table></div>
+        </table>
       </div>
     </div>
   </div>
 {% endblock %}
-
-
-
 
