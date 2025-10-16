@@ -296,7 +296,7 @@ async def validate(request: Request):
         mt = str(form.get(f"measure_type_{col}", "float"))
         measure_type_selection[col] = mt
 
-    time_date_only = form.get("time_date_only") == "on"
+    time_date_only = False
 
     try:
         if not _get_data_bytes(token):
@@ -343,7 +343,6 @@ async def validate(request: Request):
             "columns": columns,
             "role_selection": role_selection,
             "measure_type_selection": measure_type_selection,
-            "time_date_only": time_date_only,
             "schema": VALIDATION_STATE.get(token, {}).get("schema", "National"),
             "rows": per_column_rows,
             "passed": passed,
@@ -369,7 +368,6 @@ async def validate(request: Request):
                 "measure_types": MEASURE_TYPES,
                 "role_selection": role_selection,
                 "measure_type_selection": measure_type_selection,
-                "time_date_only": time_date_only,
                 "schema": VALIDATION_STATE.get(token, {}).get("schema", "National"),
                 "rows": per_column_rows,
                 "passed": passed,
@@ -387,7 +385,7 @@ async def validate(request: Request):
                 token,
                 json.dumps(columns),
                 json.dumps(role_selection),
-                time_date_only,
+                False,
                 passed,
             )
         except Exception:
@@ -432,7 +430,6 @@ async def validate_get(request: Request, token: str | None = None):
             "measure_types": MEASURE_TYPES,
             "role_selection": state.get("role_selection", {}),
             "measure_type_selection": state.get("measure_type_selection", {}),
-            "time_date_only": state.get("time_date_only", False),
             "schema": state.get("schema", "National"),
             "rows": state.get("rows", []),
             "passed": state.get("passed", False),
@@ -472,7 +469,6 @@ async def upload_get(request: Request, token: str | None = None):
                 "columns": cols,
                 "role_selection": roles,
                 "measure_type_selection": {},
-                "time_date_only": bool(snap.get("time_date_only")),
                 "schema": VALIDATION_STATE.get(token, {}).get("schema", "National"),
                 "rows": [],
                 "passed": True,
@@ -494,18 +490,16 @@ async def upload_get(request: Request, token: str | None = None):
         STEP_COMPLETION[token] = set()
     STEP_COMPLETION[token].add(3)
 
-    # Check required settings for Step 4
+    # Check required settings for Step 4 (S3 only)
     s3_bucket_cfg = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
-    airflow_base_cfg = (DB.get_setting("NDAP_AIRFLOW_URL") or os.environ.get("NDAP_AIRFLOW_URL") or "").strip()
-    airflow_dag_cfg = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
     missing_settings = []
     if not s3_bucket_cfg:
         missing_settings.append("S3_BUCKET")
-    if not airflow_base_cfg:
-        missing_settings.append("NDAP_AIRFLOW_URL")
-    if not airflow_dag_cfg:
-        missing_settings.append("loading_dag_id/NDAP_AIRFLOW_DAG_ID")
     settings_ready = len(missing_settings) == 0
+
+    s3_form_defaults = state.get("s3_form") or state.get("s3_upload") or {}
+    object_key_value = s3_form_defaults.get("object_key", "")
+    s3_folder_value = s3_form_defaults.get("folder", "")
 
     return templates.TemplateResponse(
         "s3_upload.html",
@@ -515,11 +509,12 @@ async def upload_get(request: Request, token: str | None = None):
             "columns": state.get("columns", []),
             "role_selection": state.get("role_selection", {}),
             "measure_type_selection": state.get("measure_type_selection", {}),
-            "time_date_only": state.get("time_date_only", False),
             "file_name": _get_meta(token).get("file_name", ""),
             "record_count": _get_meta(token).get("record_count", 0),
             "settings_ready": settings_ready,
             "missing_settings": missing_settings,
+            "object_key_value": object_key_value,
+            "s3_folder_value": s3_folder_value,
             "active_step": 4,
             "title": "Upload",
             "completed_steps": STEP_COMPLETION.get(token, set()),
@@ -532,13 +527,8 @@ async def upload(
     request: Request,
     token: str = Form(...),
     columns: str = Form(...),
-    upload_cleaned: str | None = Form(None),
     object_key_name: str = Form(...),
-    time_date_only: str | None = Form(None),
-    # Airflow parameters (simple)
     s3_folder_name: str | None = Form(None),
-    is_incremental: str | None = Form(None),
-    schema_exists: str | None = Form(None),
 ):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
@@ -549,6 +539,38 @@ async def upload(
     for col in columns_list:
         role_selection[col] = str(form.get(f"role_{col}", "Others"))
         measure_type_selection[col] = str(form.get(f"measure_type_{col}", "float"))
+
+    state = VALIDATION_STATE.setdefault(token, {})
+
+    s3_bucket = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
+    s3_access_key_id = (DB.get_setting("S3_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID") or "").strip()
+    s3_secret_key = (DB.get_setting("S3_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or "").strip()
+    s3_region = (os.environ.get("AWS_REGION") or "us-east-1").strip()
+
+    def _render_upload_with_error(message: str, trace: str | None = None):
+        missing_settings = []
+        if not s3_bucket:
+            missing_settings.append("S3_BUCKET")
+        form_defaults = state.get("s3_form") or {}
+        context = {
+            "request": request,
+            "token": token,
+            "columns": state.get("columns", columns_list),
+            "role_selection": state.get("role_selection", role_selection),
+            "measure_type_selection": state.get("measure_type_selection", measure_type_selection),
+            "file_name": _get_meta(token).get("file_name", ""),
+            "record_count": _get_meta(token).get("record_count", 0),
+            "settings_ready": len(missing_settings) == 0,
+            "missing_settings": missing_settings,
+            "active_step": 4,
+            "title": "Upload",
+            "completed_steps": STEP_COMPLETION.get(token, set()),
+            "error": message,
+            "trace": trace,
+            "object_key_value": form_defaults.get("object_key", ""),
+            "s3_folder_value": form_defaults.get("folder", ""),
+        }
+        return templates.TemplateResponse("s3_upload.html", context)
 
     try:
         if not _get_data_bytes(token):
@@ -563,19 +585,11 @@ async def upload(
             df,
             role_selection,
             measure_type_selection,
-            time_date_only=(time_date_only == "on"),
+            time_date_only=False,
         )
 
-        # Resolve S3 settings from Admin → Settings or environment
-        s3_bucket = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
-        s3_access_key_id = (DB.get_setting("S3_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID") or "").strip()
-        s3_secret_key = (DB.get_setting("S3_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or "").strip()
-        s3_region = (os.environ.get("AWS_REGION") or "us-east-1").strip()
         if not s3_bucket:
-            return templates.TemplateResponse(
-                "upload.html",
-                {"request": request, "error": "S3 bucket is not configured. Please set it in Admin → Settings."},
-            )
+            return _render_upload_with_error("S3 bucket is not configured. Please set it in Admin → Settings.")
         if s3_access_key_id and s3_secret_key:
             uploader = S3Uploader(
                 mode=S3CredentialsMode.Manual,
@@ -589,12 +603,13 @@ async def upload(
                 region_name=s3_region,
             )
 
-        if upload_cleaned == "on":
-            csv_bytes = cleaned_df.to_csv(index=False).encode("utf-8")
-        else:
-            csv_bytes = data
+        csv_bytes = cleaned_df.to_csv(index=False).encode("utf-8")
 
         folder_value = (s3_folder_name or "").strip()
+        state["s3_form"] = {
+            "object_key": object_key_name,
+            "folder": folder_value,
+        }
         folder_prefix = folder_value
         if folder_prefix:
             if not folder_prefix.endswith("/"):
@@ -608,102 +623,210 @@ async def upload(
             content_type="text/csv",
         )
 
-        # Mark step 3 as completed
         if token not in STEP_COMPLETION:
             STEP_COMPLETION[token] = set()
         STEP_COMPLETION[token].add(3)
+        STEP_COMPLETION[token].add(4)
 
-        # Optionally trigger Airflow DAG
-        airflow_triggered = False
-        airflow_dag_run_id = None
-        airflow_embed_url = None
-        airflow_run_url = None
-        airflow_error = None
-        airflow_dag_id_val = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "")
-        # Always attempt to trigger using saved settings if available
-        base = (os.environ.get("NDAP_AIRFLOW_URL") or (DB.get_setting("NDAP_AIRFLOW_URL") or "")).strip()
-        base = _ensure_url_scheme(base)
-        dag = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
-        usr = (os.environ.get("NDAP_AIRFLOW_USER") or (DB.get_setting("NDAP_AIRFLOW_USER") or "")).strip()
-        pwd = (os.environ.get("NDAP_AIRFLOW_PASSWORD") or (DB.get_setting("NDAP_AIRFLOW_PASSWORD") or "")).strip()
-        base = _ensure_url_scheme(base)
-        if base and dag:
-            base = _ensure_url_scheme(base)
-            conf_obj = {
-                "source_code": folder_value,
-                "arg1": "yes" if is_incremental == "on" else "no",
-                "arg2": "yes" if schema_exists == "on" else "no",
-                "s3_uri": s3_uri,
-                "token": token,
-            }
-            ok, info = trigger_airflow_dag(base, dag, username=usr or None, password=pwd or None, conf=conf_obj)
-            airflow_triggered = ok
-            if ok:
-                airflow_dag_run_id = info.get("dag_run_id") if isinstance(info, dict) else None
-                v = "grid"
-                query_params: List[Tuple[str, str]] = [("tab", "graph")]
-                if airflow_dag_run_id:
-                    # Ensure the run id remains percent-encoded when passed to Airflow links
-                    query_params.append(("dag_run_id", airflow_dag_run_id))
-                query = urlencode(query_params, quote_via=quote)
-                run_path = f"/dags/{dag}/{v}"
-                if query:
-                    run_path = f"{run_path}?{query}"
-                embed_base = _add_basic_auth_to_url(base, usr or None, pwd or None)
-                airflow_run_url = f"{base.rstrip('/')}{run_path}"
-                airflow_embed_url = f"{embed_base.rstrip('/')}{run_path}"
-            else:
-                if isinstance(info, dict):
-                    airflow_error = info.get("error") or info.get("message") or info.get("raw")
-                else:
-                    airflow_error = str(info)
-        else:
-            airflow_error = "Airflow URL or DAG ID is not configured."
+        state["s3_upload"] = {
+            "bucket": s3_bucket,
+            "object_key": key,
+            "folder": folder_value,
+            "s3_uri": s3_uri,
+        }
 
-        resp = templates.TemplateResponse(
-            "result.html",
-            {
-                "request": request,
-                "success": True,
-                "s3_uri": s3_uri,
-                "airflow_triggered": airflow_triggered,
-                "airflow_dag_id": airflow_dag_id_val,
-                "airflow_dag_run_id": airflow_dag_run_id,
-                "airflow_embed_url": airflow_embed_url,
-                "airflow_run_url": airflow_run_url,
-                "airflow_error": airflow_error,
-                "file_name": _get_meta(token).get("file_name", ""),
-                "record_count": _get_meta(token).get("record_count", 0),
-                "active_step": 4,
-                "title": "Upload",
-                "token": token,
-                "columns": columns_list,
-                "completed_steps": STEP_COMPLETION.get(token, set()),
-            },
-        )
         try:
-            DB.log_upload(token, get_username(request), s3_bucket, key, s3_uri, upload_cleaned == "on")
+            DB.log_upload(token, get_username(request), s3_bucket, key, s3_uri, True)
         except Exception:
             pass
-        return resp
+
+        return RedirectResponse(url=f"/airflow-trigger?token={token}&uploaded=1", status_code=303)
     except Exception as ex:
         trace = traceback.format_exc()
-        return templates.TemplateResponse(
-            "result.html",
-            {
-                "request": request,
-                "success": False,
-                "error": str(ex),
-                "trace": trace,
-                "file_name": _get_meta(token).get("file_name", ""),
-                "record_count": _get_meta(token).get("record_count", 0),
-                "active_step": 4,
-                "title": "Upload",
-                "token": token,
-                "columns": columns_list,
-                "completed_steps": STEP_COMPLETION.get(token, set()),
-            },
-        )
+        return _render_upload_with_error(str(ex), trace)
+
+
+@app.get("/airflow-trigger", response_class=HTMLResponse)
+async def airflow_trigger_get(request: Request, token: str | None = None, uploaded: str | None = None):
+    if not require_login(request):
+        return RedirectResponse(url="/login", status_code=302)
+    if not token:
+        return RedirectResponse(url="/", status_code=302)
+    state = VALIDATION_STATE.get(token)
+    if not state or "s3_upload" not in state:
+        return RedirectResponse(url=f"/upload?token={token}", status_code=302)
+    if token not in STEP_COMPLETION:
+        STEP_COMPLETION[token] = set()
+    STEP_COMPLETION[token].add(3)
+    STEP_COMPLETION[token].add(4)
+
+    s3_info = state["s3_upload"]
+    s3_bucket = s3_info.get("bucket", "")
+    s3_object_key = s3_info.get("object_key", "")
+    s3_uri = s3_info.get("s3_uri", "")
+    s3_folder = s3_info.get("folder", "")
+
+    airflow_base, username, password = _get_airflow_config()
+    airflow_dag_id_val = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
+    missing_settings = []
+    if not airflow_base:
+        missing_settings.append("NDAP_AIRFLOW_URL")
+    if not airflow_dag_id_val:
+        missing_settings.append("loading_dag_id/NDAP_AIRFLOW_DAG_ID")
+    settings_ready = len(missing_settings) == 0
+
+    airflow_params = state.get("airflow_params", {})
+    is_incremental = bool(airflow_params.get("is_incremental"))
+    schema_exists = bool(airflow_params.get("schema_exists"))
+
+    meta = _get_meta(token)
+    context = {
+        "request": request,
+        "token": token,
+        "s3_bucket": s3_bucket,
+        "s3_object_key": s3_object_key,
+        "s3_uri": s3_uri,
+        "s3_folder": s3_folder,
+        "is_incremental": is_incremental,
+        "schema_exists": schema_exists,
+        "airflow_ready": settings_ready,
+        "missing_settings": missing_settings,
+        "uploaded_recently": uploaded == "1",
+        "file_name": meta.get("file_name", ""),
+        "record_count": meta.get("record_count", 0),
+        "active_step": 5,
+        "title": "Trigger Airflow",
+        "completed_steps": STEP_COMPLETION.get(token, set()),
+        "error": None,
+        "trace": None,
+    }
+    return templates.TemplateResponse("airflow_trigger.html", context)
+
+
+@app.post("/airflow-trigger", response_class=HTMLResponse)
+async def airflow_trigger_post(
+    request: Request,
+    token: str = Form(...),
+    is_incremental: str | None = Form(None),
+    schema_exists: str | None = Form(None),
+):
+    if not require_login(request):
+        return RedirectResponse(url="/login", status_code=302)
+    state = VALIDATION_STATE.get(token)
+    if not state or "s3_upload" not in state:
+        return RedirectResponse(url=f"/upload?token={token}", status_code=302)
+    if token not in STEP_COMPLETION:
+        STEP_COMPLETION[token] = set()
+    s3_info = state["s3_upload"]
+    s3_bucket = s3_info.get("bucket")
+    s3_object_key = s3_info.get("object_key")
+    s3_uri = s3_info.get("s3_uri")
+    folder_value = s3_info.get("folder", "")
+    if not s3_bucket or not s3_object_key or not s3_uri:
+        return RedirectResponse(url=f"/upload?token={token}", status_code=302)
+
+    inc_bool = is_incremental == "on"
+    schema_bool = schema_exists == "on"
+    state["airflow_params"] = {"is_incremental": inc_bool, "schema_exists": schema_bool}
+
+    airflow_base, username, password = _get_airflow_config()
+    airflow_dag_id_val = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
+    missing_settings = []
+    if not airflow_base:
+        missing_settings.append("NDAP_AIRFLOW_URL")
+    if not airflow_dag_id_val:
+        missing_settings.append("loading_dag_id/NDAP_AIRFLOW_DAG_ID")
+    settings_ready = len(missing_settings) == 0
+
+    def _render_trigger_with_error(message: str, trace: str | None = None):
+        meta = _get_meta(token)
+        context = {
+            "request": request,
+            "token": token,
+            "s3_bucket": s3_bucket or "",
+            "s3_object_key": s3_object_key or "",
+            "s3_uri": s3_uri or "",
+            "s3_folder": folder_value,
+            "is_incremental": inc_bool,
+            "schema_exists": schema_bool,
+            "airflow_ready": settings_ready,
+            "missing_settings": missing_settings,
+            "uploaded_recently": False,
+            "file_name": meta.get("file_name", ""),
+            "record_count": meta.get("record_count", 0),
+            "active_step": 5,
+            "title": "Trigger Airflow",
+            "completed_steps": STEP_COMPLETION.get(token, set()),
+            "error": message,
+            "trace": trace,
+        }
+        return templates.TemplateResponse("airflow_trigger.html", context)
+
+    if not settings_ready:
+        return _render_trigger_with_error("Airflow settings are incomplete. Please update the Admin settings.")
+
+    dag = airflow_dag_id_val
+    usr = username
+    pwd = password
+
+    conf_obj = {
+        "source_code": folder_value,
+        "arg1": "yes" if inc_bool else "no",
+        "arg2": "yes" if schema_bool else "no",
+        "s3_uri": s3_uri,
+        "token": token,
+    }
+    ok, info = trigger_airflow_dag(airflow_base, dag, username=usr or None, password=pwd or None, conf=conf_obj)
+    airflow_dag_run_id = None
+    airflow_run_url = None
+    airflow_embed_url = None
+    airflow_error = None
+
+    if ok:
+        airflow_dag_run_id = info.get("dag_run_id") if isinstance(info, dict) else None
+        v = "grid"
+        query_params: List[Tuple[str, str]] = [("tab", "graph")]
+        if airflow_dag_run_id:
+            query_params.append(("dag_run_id", airflow_dag_run_id))
+        query = urlencode(query_params, quote_via=quote)
+        run_path = f"/dags/{dag}/{v}"
+        if query:
+            run_path = f"{run_path}?{query}"
+        embed_base = _add_basic_auth_to_url(airflow_base, usr or None, pwd or None)
+        airflow_run_url = f"{airflow_base.rstrip('/')}{run_path}"
+        airflow_embed_url = f"{embed_base.rstrip('/')}{run_path}"
+        STEP_COMPLETION[token].add(5)
+    else:
+        if isinstance(info, dict):
+            airflow_error = info.get("error") or info.get("message") or info.get("raw")
+        else:
+            airflow_error = str(info)
+        return _render_trigger_with_error(airflow_error or "Failed to trigger Airflow DAG.")
+
+    meta = _get_meta(token)
+    columns_state = state.get("columns", [])
+
+    return templates.TemplateResponse(
+        "result.html",
+        {
+            "request": request,
+            "success": True,
+            "s3_uri": s3_uri,
+            "airflow_triggered": ok,
+            "airflow_dag_id": airflow_dag_id_val,
+            "airflow_dag_run_id": airflow_dag_run_id,
+            "airflow_embed_url": airflow_embed_url,
+            "airflow_run_url": airflow_run_url,
+            "airflow_error": airflow_error,
+            "file_name": meta.get("file_name", ""),
+            "record_count": meta.get("record_count", 0),
+            "active_step": 5,
+            "title": "Trigger Airflow",
+            "token": token,
+            "columns": columns_state,
+            "completed_steps": STEP_COMPLETION.get(token, set()),
+        },
+    )
 
 
 @app.get("/login", response_class=HTMLResponse)

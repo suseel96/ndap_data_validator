@@ -36,10 +36,11 @@
         <ol class="stepper stepper-horizontal list-unstyled d-flex gap-4 flex-wrap">
           {% set token_q = token if token is defined and token else None %}
           {% set qs = ('?token=' ~ token_q) if token_q else '' %}
+          {% set lock_backwards = (active_step | default(1)) >= 5 %}
           {% set completed = completed_steps | default([]) %}
           
           <li class="step {% if active_step == 1 %}active{% endif %} {% if 1 in completed %}completed{% endif %}">
-            {% if active_step == 1 %}
+            {% if active_step == 1 or lock_backwards %}
               <span class="step-link">
                 <div class="step-icon">1</div>
                 <div class="step-title">Upload CSV and preview</div>
@@ -53,7 +54,7 @@
           </li>
           <li class="step {% if active_step == 2 %}active{% endif %} {% if 2 in completed %}completed{% endif %} {% if 1 not in completed %}disabled{% endif %}">
             {% if 1 in completed %}
-              {% if active_step == 2 %}
+              {% if active_step == 2 or lock_backwards %}
                 <span class="step-link">
                   <div class="step-icon">2</div>
                   <div class="step-title">Select column types</div>
@@ -73,7 +74,7 @@
           </li>
           <li class="step {% if active_step == 3 %}active{% endif %} {% if 3 in completed %}completed{% endif %} {% if 2 not in completed %}disabled{% endif %}">
             {% if 2 in completed %}
-              {% if active_step == 3 %}
+              {% if active_step == 3 or lock_backwards %}
                 <span class="step-link">
                   <div class="step-icon">3</div>
                   <div class="step-title">Perform validations</div>
@@ -93,7 +94,7 @@
           </li>
           <li class="step {% if active_step == 4 %}active{% endif %} {% if 4 in completed %}completed{% endif %} {% if 3 not in completed %}disabled{% endif %}">
             {% if 3 in completed %}
-              {% if active_step == 4 %}
+              {% if active_step == 4 or lock_backwards %}
                 <span class="step-link">
                   <div class="step-icon">4</div>
                   <div class="step-title">Upload to AWS S3</div>
@@ -108,6 +109,26 @@
               <span class="step-link disabled">
                 <div class="step-icon">4</div>
                 <div class="step-title">Upload to AWS S3</div>
+              </span>
+            {% endif %}
+          </li>
+          <li class="step {% if active_step == 5 %}active{% endif %} {% if 5 in completed %}completed{% endif %} {% if 4 not in completed %}disabled{% endif %}">
+            {% if 4 in completed %}
+              {% if active_step == 5 or lock_backwards %}
+                <span class="step-link">
+                  <div class="step-icon">5</div>
+                  <div class="step-title">Trigger Airflow</div>
+                </span>
+              {% else %}
+                <a href="/airflow-trigger{{ qs }}" class="step-link">
+                  <div class="step-icon">5</div>
+                  <div class="step-title">Trigger Airflow</div>
+                </a>
+              {% endif %}
+            {% else %}
+              <span class="step-link disabled">
+                <div class="step-icon">5</div>
+                <div class="step-title">Trigger Airflow</div>
               </span>
             {% endif %}
           </li>
