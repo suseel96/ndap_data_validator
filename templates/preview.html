@@ -28,11 +28,6 @@
     <input type="hidden" name="token" value="{{ token }}" />
     <input type="hidden" name="columns" value="{{ '|||' . join(columns) }}" />
 
-    <div class="form-check form-switch mb-3">
-      <input class="form-check-input" type="checkbox" name="time_date_only" id="time_date_only">
-      <label class="form-check-label" for="time_date_only">Treat Time as date only (drop time components)</label>
-    </div>
-
     <div class="alert alert-info py-2">
       {% if (schema or 'National') == 'National' %}
         <strong>Requirement:</strong> For National datasets, at least one Time, Measure, and Location column is required.
