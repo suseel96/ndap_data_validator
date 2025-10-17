@@ -55,6 +55,23 @@ def require_login(request: Request) -> bool:
     return bool(get_username(request))
 
 
+def _generate_run_id() -> str:
+    return f"RUN-{uuid4().hex[:8].upper()}"
+
+
+def _reset_run_id(request: Request) -> str:
+    run_id = _generate_run_id()
+    request.session["current_run_id"] = run_id
+    return run_id
+
+
+def _get_active_run_id(request: Request) -> str:
+    run_id = request.session.get("current_run_id")
+    if not run_id:
+        run_id = _reset_run_id(request)
+    return run_id
+
+
 def _read_df_from_bytes(data: bytes, nrows=None) -> pd.DataFrame:
     return (
         pd.read_csv(io.BytesIO(data), nrows=nrows)
@@ -77,7 +94,8 @@ def _get_meta(token: str) -> Dict[str, object]:
     state = VALIDATION_STATE.get(token, {}) or {}
     file_name = state.get("file_name", "")
     record_count = int(state.get("record_count", 0) or 0)
-    if (not file_name) or record_count == 0:
+    run_id = state.get("run_id", "")
+    if (not file_name) or record_count == 0 or not run_id:
         try:
             meta = DB.get_upload_meta(token)
             if meta:
@@ -85,9 +103,19 @@ def _get_meta(token: str) -> Dict[str, object]:
                     file_name = meta.get("filename") or ""
                 if record_count == 0:
                     record_count = int(meta.get("record_count") or 0)
+                if not run_id:
+                    run_id = str(meta.get("run_id") or "")
+                # Update cached state so future lookups have metadata
+                cached = VALIDATION_STATE.setdefault(token, {})
+                if file_name and not cached.get("file_name"):
+                    cached["file_name"] = file_name
+                if record_count and not cached.get("record_count"):
+                    cached["record_count"] = record_count
+                if run_id and not cached.get("run_id"):
+                    cached["run_id"] = run_id
         except Exception:
             pass
-    return {"file_name": file_name, "record_count": record_count}
+    return {"file_name": file_name, "record_count": record_count, "run_id": run_id}
 
 def _ensure_url_scheme(url: str, default: str = "http") -> str:
     if not url:
@@ -180,24 +208,37 @@ def trigger_airflow_dag(base_url: str, dag_id: str, username: str | None = None,
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+async def index(request: Request, reset: str | None = None):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
+    run_id = request.session.get("current_run_id")
+    if reset and reset.lower() in {"1", "true", "yes"}:
+        run_id = _reset_run_id(request)
+    elif not run_id:
+        run_id = _reset_run_id(request)
     return templates.TemplateResponse("upload.html", {
         "request": request, 
         "active_step": 1, 
         "title": "Upload",
         "completed_steps": set(),
-        "token": None
+        "token": None,
+        "run_id": run_id,
     })
 
 
 @app.post("/preview", response_class=HTMLResponse)
-async def preview(request: Request, file: UploadFile = File(...), schema: str = Form("National")):
+async def preview(
+    request: Request,
+    file: UploadFile = File(...),
+    schema: str = Form("National"),
+    run_id: str | None = Form(None),
+):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
     try:
         content = await file.read()
+        run_id = (run_id or "").strip() or _generate_run_id()
+        request.session["current_run_id"] = run_id
         token = uuid4().hex
         DATA_STORE[token] = content
         # Persist to database as well to survive reloads
@@ -212,12 +253,17 @@ async def preview(request: Request, file: UploadFile = File(...), schema: str = 
         except Exception:
             record_count = 0
         try:
-            DB.save_upload(token, get_username(request), file_name, content, record_count)
+            DB.save_upload(token, get_username(request), file_name, content, record_count, run_id=run_id)
         except Exception:
             pass
 
         # Persist selected schema and mark step 1 as completed
-        VALIDATION_STATE[token] = {"schema": schema, "file_name": file_name, "record_count": record_count}
+        VALIDATION_STATE[token] = {
+            "schema": schema,
+            "file_name": file_name,
+            "record_count": record_count,
+            "run_id": run_id,
+        }
         STEP_COMPLETION[token] = {1}
         return templates.TemplateResponse(
             "preview.html",
@@ -234,12 +280,14 @@ async def preview(request: Request, file: UploadFile = File(...), schema: str = 
                 "active_step": 2,
                 "title": "Select types",
                 "completed_steps": STEP_COMPLETION.get(token, set()),
+                "run_id": run_id,
             },
         )
     except Exception as ex:
+        run_id = _reset_run_id(request)
         return templates.TemplateResponse(
             "upload.html",
-            {"request": request, "error": f"Failed to read CSV: {ex}"},
+            {"request": request, "error": f"Failed to read CSV: {ex}", "run_id": run_id, "active_step": 1, "title": "Upload", "completed_steps": set(), "token": None},
         )
 
 
@@ -276,6 +324,7 @@ async def preview_get(request: Request, token: str | None = None):
             "active_step": 2,
             "title": "Select types",
             "completed_steps": STEP_COMPLETION.get(token, set()),
+            "run_id": meta.get("run_id", ""),
         },
     )
 
@@ -288,6 +337,7 @@ async def validate(request: Request):
     token = str(form.get("token"))
     columns_serialized = str(form.get("columns", ""))
     columns: List[str] = [c for c in columns_serialized.split("|||") if c]
+    run_id_raw = str(form.get("run_id") or "").strip()
 
     # role selections
     role_selection: Dict[str, str] = {}
@@ -340,16 +390,20 @@ async def validate(request: Request):
 
         # persist validation state for navigation
         meta = _get_meta(token)
+        prior_state = VALIDATION_STATE.get(token, {})
+        schema_name = prior_state.get("schema", "National")
+        run_id = run_id_raw or prior_state.get("run_id") or meta.get("run_id", "")
         VALIDATION_STATE[token] = {
             "columns": columns,
             "role_selection": role_selection,
             "measure_type_selection": measure_type_selection,
-            "schema": VALIDATION_STATE.get(token, {}).get("schema", "National"),
+            "schema": schema_name,
             "rows": per_column_rows,
             "passed": passed,
             "failed_columns": failed_columns,
             "file_name": meta.get("file_name", ""),
             "record_count": meta.get("record_count", 0),
+            "run_id": run_id,
         }
         # Mark step 2 as completed
         if token not in STEP_COMPLETION:
@@ -378,6 +432,7 @@ async def validate(request: Request):
                 "active_step": 3,
                 "title": "Validate",
                 "completed_steps": STEP_COMPLETION.get(token, set()),
+                "run_id": run_id,
             },
         )
         # Persist validation snapshot to DB for resilience across reloads
@@ -388,19 +443,30 @@ async def validate(request: Request):
                 json.dumps(role_selection),
                 False,
                 passed,
+                run_id=run_id,
             )
         except Exception:
             pass
         try:
-            DB.log_validation(token, get_username(request), passed, ",".join(failed_columns))
+            DB.log_validation(token, get_username(request), passed, ",".join(failed_columns), run_id=run_id)
         except Exception:
             pass
         return resp
     except Exception as ex:
         trace = traceback.format_exc()
+        meta = _get_meta(token)
         return templates.TemplateResponse(
             "upload.html",
-            {"request": request, "error": f"Validation failed: {ex}", "trace": trace},
+            {
+                "request": request,
+                "error": f"Validation failed: {ex}",
+                "trace": trace,
+                "run_id": meta.get("run_id", ""),
+                "active_step": 1,
+                "title": "Upload",
+                "completed_steps": set(),
+                "token": None,
+            },
         )
 
 
@@ -421,6 +487,9 @@ async def validate_get(request: Request, token: str | None = None):
             STEP_COMPLETION[token] = set()
         STEP_COMPLETION[token].add(3)
 
+    meta = _get_meta(token)
+    if meta.get("run_id") and not state.get("run_id"):
+        state["run_id"] = meta.get("run_id")
     return templates.TemplateResponse(
         "validate.html",
         {
@@ -435,11 +504,12 @@ async def validate_get(request: Request, token: str | None = None):
             "rows": state.get("rows", []),
             "passed": state.get("passed", False),
             "failed_columns": state.get("failed_columns", []),
-            "file_name": _get_meta(token).get("file_name", ""),
-            "record_count": _get_meta(token).get("record_count", 0),
+            "file_name": meta.get("file_name", ""),
+            "record_count": meta.get("record_count", 0),
             "active_step": 3,
             "title": "Validate",
             "completed_steps": STEP_COMPLETION.get(token, set()),
+            "run_id": state.get("run_id") or meta.get("run_id", ""),
         },
     )
 
@@ -474,6 +544,7 @@ async def upload_get(request: Request, token: str | None = None):
                 "rows": [],
                 "passed": True,
                 "failed_columns": [],
+                "run_id": (snap.get("run_id") or ""),
             }
             VALIDATION_STATE[token] = state
             if token not in STEP_COMPLETION:
@@ -502,6 +573,9 @@ async def upload_get(request: Request, token: str | None = None):
     object_key_value = s3_form_defaults.get("object_key", "")
     s3_folder_value = s3_form_defaults.get("folder", "")
 
+    meta = _get_meta(token)
+    if meta.get("run_id") and not state.get("run_id"):
+        state["run_id"] = meta.get("run_id")
     return templates.TemplateResponse(
         "s3_upload.html",
         {
@@ -510,8 +584,8 @@ async def upload_get(request: Request, token: str | None = None):
             "columns": state.get("columns", []),
             "role_selection": state.get("role_selection", {}),
             "measure_type_selection": state.get("measure_type_selection", {}),
-            "file_name": _get_meta(token).get("file_name", ""),
-            "record_count": _get_meta(token).get("record_count", 0),
+            "file_name": meta.get("file_name", ""),
+            "record_count": meta.get("record_count", 0),
             "settings_ready": settings_ready,
             "missing_settings": missing_settings,
             "object_key_value": object_key_value,
@@ -519,6 +593,7 @@ async def upload_get(request: Request, token: str | None = None):
             "active_step": 4,
             "title": "Upload",
             "completed_steps": STEP_COMPLETION.get(token, set()),
+            "run_id": state.get("run_id") or meta.get("run_id", ""),
         },
     )
 
@@ -542,6 +617,15 @@ async def upload(
         measure_type_selection[col] = str(form.get(f"measure_type_{col}", "float"))
 
     state = VALIDATION_STATE.setdefault(token, {})
+    meta = _get_meta(token)
+    run_id_form = str(form.get("run_id") or "").strip()
+    run_id = run_id_form or state.get("run_id") or meta.get("run_id", "")
+    if run_id and not state.get("run_id"):
+        state["run_id"] = run_id
+
+    existing_upload = state.get("s3_upload")
+    if existing_upload and existing_upload.get("s3_uri"):
+        return RedirectResponse(url=f"/airflow-trigger?token={token}", status_code=303)
 
     s3_bucket = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
     s3_access_key_id = (DB.get_setting("S3_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID") or "").strip()
@@ -553,14 +637,15 @@ async def upload(
         if not s3_bucket:
             missing_settings.append("S3_BUCKET")
         form_defaults = state.get("s3_form") or {}
+        meta = _get_meta(token)
         context = {
             "request": request,
             "token": token,
             "columns": state.get("columns", columns_list),
             "role_selection": state.get("role_selection", role_selection),
             "measure_type_selection": state.get("measure_type_selection", measure_type_selection),
-            "file_name": _get_meta(token).get("file_name", ""),
-            "record_count": _get_meta(token).get("record_count", 0),
+            "file_name": meta.get("file_name", ""),
+            "record_count": meta.get("record_count", 0),
             "settings_ready": len(missing_settings) == 0,
             "missing_settings": missing_settings,
             "active_step": 4,
@@ -570,6 +655,7 @@ async def upload(
             "trace": trace,
             "object_key_value": form_defaults.get("object_key", ""),
             "s3_folder_value": form_defaults.get("folder", ""),
+            "run_id": state.get("run_id") or meta.get("run_id", ""),
         }
         return templates.TemplateResponse("s3_upload.html", context)
 
@@ -577,7 +663,15 @@ async def upload(
         if not _get_data_bytes(token):
             return templates.TemplateResponse(
                 "upload.html",
-                {"request": request, "error": "Session expired or file not found. Please re-upload your CSV."},
+                {
+                    "request": request,
+                    "error": "Session expired or file not found. Please re-upload your CSV.",
+                    "run_id": _reset_run_id(request),
+                    "active_step": 1,
+                    "title": "Upload",
+                    "completed_steps": set(),
+                    "token": None,
+                },
             )
         data = _get_data_bytes(token)
         df = _read_df_from_bytes(data)
@@ -644,6 +738,8 @@ async def upload(
                 s3_uri,
                 status="Success",
                 comments="Upload completed",
+                dag_status="Not triggered",
+                run_id=run_id,
             )
         except Exception:
             pass
@@ -707,6 +803,7 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
         "completed_steps": STEP_COMPLETION.get(token, set()),
         "error": None,
         "trace": None,
+        "run_id": meta.get("run_id", ""),
     }
     return templates.TemplateResponse("airflow_trigger.html", context)
 
@@ -717,6 +814,7 @@ async def airflow_trigger_post(
     token: str = Form(...),
     is_incremental: str | None = Form(None),
     schema_exists: str | None = Form(None),
+    run_id: str | None = Form(None),
 ):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
@@ -733,6 +831,10 @@ async def airflow_trigger_post(
     if not s3_bucket or not s3_object_key or not s3_uri:
         return RedirectResponse(url=f"/upload?token={token}", status_code=302)
 
+    existing_run = state.get("airflow_run")
+    if existing_run and existing_run.get("dag_run_id"):
+        return RedirectResponse(url=f"/airflow-trigger?token={token}", status_code=303)
+
     inc_bool = is_incremental == "on"
     schema_bool = schema_exists == "on"
     state["airflow_params"] = {"is_incremental": inc_bool, "schema_exists": schema_bool}
@@ -746,8 +848,16 @@ async def airflow_trigger_post(
         missing_settings.append("loading_dag_id/NDAP_AIRFLOW_DAG_ID")
     settings_ready = len(missing_settings) == 0
 
+    meta = _get_meta(token)
+    run_id_form = (run_id or "").strip()
+    resolved_run_id = run_id_form or state.get("run_id") or meta.get("run_id", "")
+    if resolved_run_id and not state.get("run_id"):
+        state["run_id"] = resolved_run_id
+    if resolved_run_id and not meta.get("run_id"):
+        meta["run_id"] = resolved_run_id
+
     def _render_trigger_with_error(message: str, trace: str | None = None):
-        meta = _get_meta(token)
+        refreshed_meta = _get_meta(token)
         context = {
             "request": request,
             "token": token,
@@ -760,13 +870,14 @@ async def airflow_trigger_post(
             "airflow_ready": settings_ready,
             "missing_settings": missing_settings,
             "uploaded_recently": False,
-            "file_name": meta.get("file_name", ""),
-            "record_count": meta.get("record_count", 0),
+            "file_name": refreshed_meta.get("file_name", ""),
+            "record_count": refreshed_meta.get("record_count", 0),
             "active_step": 5,
             "title": "Trigger Airflow",
             "completed_steps": STEP_COMPLETION.get(token, set()),
             "error": message,
             "trace": trace,
+            "run_id": resolved_run_id or refreshed_meta.get("run_id", ""),
         }
         return templates.TemplateResponse("airflow_trigger.html", context)
 
@@ -810,16 +921,33 @@ async def airflow_trigger_post(
                 dag_status="Triggered",
                 dag_run_id=airflow_dag_run_id,
                 comments="",
+                bucket=s3_bucket,
+                object_key=s3_object_key,
+                s3_uri=s3_uri,
+                status="Success",
+                run_id=resolved_run_id,
             )
         except Exception:
             pass
+        state["airflow_run"] = {
+            "dag_run_id": airflow_dag_run_id or "",
+            "status": "Triggered",
+        }
     else:
         if isinstance(info, dict):
             airflow_error = info.get("error") or info.get("message") or info.get("raw")
         else:
             airflow_error = str(info)
         try:
-            DB.update_upload_airflow(token, dag_status="Failed", comments=airflow_error or "")
+            DB.update_upload_airflow(
+                token,
+                dag_status="Failed",
+                comments=airflow_error or "",
+                bucket=s3_bucket,
+                object_key=s3_object_key,
+                s3_uri=s3_uri,
+                run_id=resolved_run_id,
+            )
         except Exception:
             pass
         return _render_trigger_with_error(airflow_error or "Failed to trigger Airflow DAG.")
@@ -846,6 +974,7 @@ async def airflow_trigger_post(
             "token": token,
             "columns": columns_state,
             "completed_steps": STEP_COMPLETION.get(token, set()),
+            "run_id": meta.get("run_id", ""),
         },
     )
 
@@ -893,6 +1022,7 @@ async def admin_logs(request: Request, username: str | None = None):
     if not require_admin(request):
         return RedirectResponse(url="/", status_code=302)
     pipeline_logs = DB.list_pipeline_logs(username=username or None)
+    airflow_dag_id = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
     return templates.TemplateResponse(
         "admin_logs.html",
         {
@@ -901,6 +1031,7 @@ async def admin_logs(request: Request, username: str | None = None):
             "pipeline_logs": pipeline_logs,
             "filter_username": username or "",
             "show_stepper": False,
+            "airflow_dag_id": airflow_dag_id,
         },
     )
 
@@ -911,6 +1042,7 @@ async def user_logs(request: Request):
         return RedirectResponse(url="/login", status_code=302)
     username = get_username(request)
     pipeline_logs = DB.list_pipeline_logs(username=username)
+    airflow_dag_id = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
     return templates.TemplateResponse(
         "user_logs.html",
         {
@@ -918,6 +1050,7 @@ async def user_logs(request: Request):
             "title": "My Logs",
             "pipeline_logs": pipeline_logs,
             "show_stepper": False,
+            "airflow_dag_id": airflow_dag_id,
         },
     )
 
@@ -1062,14 +1195,19 @@ async def airflow_run_status(request: Request, dag_id: str, dag_run_id: str):
     payload["dag_run_id"] = dag_run_id
     if source_code:
         payload["source_code"] = source_code
+
+    normalized_state = (state or "").strip()
+    status_label = normalized_state.replace("_", " ").title() if normalized_state else None
     if token_param:
         try:
-            status_label = state.title() if state else None
+            meta = _get_meta(token_param)
             DB.update_upload_airflow(
                 token_param,
                 dag_status=status_label,
-                dag_run_id=dag_run_id,
+                dag_run_id=dag_run_id if dag_run_id else None,
                 source_code=source_code if source_code else None,
+                status="Success" if normalized_state.lower() == "success" else None,
+                run_id=meta.get("run_id", ""),
             )
         except Exception:
             pass
@@ -1149,6 +1287,7 @@ async def admin_settings_save(
     except Exception:
         pass
     return RedirectResponse(url="/admin/settings?saved=1", status_code=303)
+
 
 
 

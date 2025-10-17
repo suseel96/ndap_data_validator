@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
+import uuid
 
 import duckdb
 from passlib.context import CryptContext
@@ -17,6 +18,10 @@ class Database:
 
     def connect(self):
         return duckdb.connect(self.path)
+
+    @staticmethod
+    def _new_id() -> int:
+        return uuid.uuid4().int & ((1 << 63) - 1)
 
     def init(self) -> None:
         con = self.connect()
@@ -40,6 +45,7 @@ class Database:
                 """
                 CREATE TABLE IF NOT EXISTS uploads (
                   token TEXT,
+                  run_id TEXT,
                   username TEXT,
                   filename TEXT,
                   data_bytes BLOB,
@@ -54,6 +60,7 @@ class Database:
             con.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS role_selection_json TEXT;")
             con.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS time_date_only BOOLEAN;")
             con.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS validated_passed BOOLEAN;")
+            con.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS run_id TEXT;")
             # Backfill columns if database exists from older version
             con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;")
             con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;")
@@ -65,6 +72,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS validation_logs (
                   id BIGINT PRIMARY KEY,
                   token TEXT,
+                  run_id TEXT,
                   username TEXT,
                   passed BOOLEAN,
                   failed_columns TEXT,
@@ -72,11 +80,13 @@ class Database:
                 );
                 """
             )
+            con.execute("ALTER TABLE validation_logs ADD COLUMN IF NOT EXISTS run_id TEXT;")
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS upload_logs (
                   id BIGINT PRIMARY KEY,
                   token TEXT,
+                  run_id TEXT,
                   username TEXT,
                   bucket TEXT,
                   object_key TEXT,
@@ -96,6 +106,7 @@ class Database:
             con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS dag_status TEXT;")
             con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS dag_run_id TEXT;")
             con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS source_code TEXT;")
+            con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS run_id TEXT;")
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS app_settings (
@@ -212,12 +223,19 @@ class Database:
         finally:
             con.close()
 
-    def log_validation(self, token: str, username: Optional[str], passed: bool, failed_columns_csv: str) -> None:
+    def log_validation(
+        self,
+        token: str,
+        username: Optional[str],
+        passed: bool,
+        failed_columns_csv: str,
+        run_id: Optional[str] = None,
+    ) -> None:
         con = self.connect()
         try:
             con.execute(
-                "INSERT INTO validation_logs (id, token, username, passed, failed_columns) VALUES (hash(now()), ?, ?, ?, ?)",
-                [token, username or "", passed, failed_columns_csv],
+                "INSERT INTO validation_logs (id, token, run_id, username, passed, failed_columns) VALUES (?, ?, ?, ?, ?, ?)",
+                [self._new_id(), token, run_id or "", username or "", passed, failed_columns_csv],
             )
         finally:
             con.close()
@@ -231,26 +249,29 @@ class Database:
         s3_uri: str,
         status: str,
         comments: Optional[str] = None,
-        dag_status: Optional[str] = None,
+        dag_status: Optional[str] = "Not triggered",
         dag_run_id: Optional[str] = None,
         source_code: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> None:
         con = self.connect()
         try:
             con.execute(
                 """
                 INSERT INTO upload_logs (
-                  id, token, username, bucket, object_key, s3_uri, cleaned, status, comments, dag_status, dag_run_id, source_code
+                  id, token, run_id, username, bucket, object_key, s3_uri, cleaned, status, comments, dag_status, dag_run_id, source_code
                 )
-                VALUES (hash(now()), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
+                    self._new_id(),
                     token,
+                    run_id or "",
                     username or "",
                     bucket,
                     object_key,
                     s3_uri,
-                    False,
+                    True,
                     status,
                     comments or "",
                     dag_status or "",
@@ -262,13 +283,29 @@ class Database:
             con.close()
 
     # Upload persistence for CSV bytes
-    def save_upload(self, token: str, username: Optional[str], filename: str, data_bytes: bytes, record_count: int) -> None:
+    def save_upload(
+        self,
+        token: str,
+        username: Optional[str],
+        filename: str,
+        data_bytes: bytes,
+        record_count: int,
+        run_id: Optional[str] = None,
+    ) -> None:
         con = self.connect()
         try:
             con.execute("DELETE FROM uploads WHERE token = ?", [token])
             con.execute(
-                "INSERT INTO uploads (token, username, filename, data_bytes, size_bytes, record_count) VALUES (?, ?, ?, ?, ?, ?)",
-                [token, username or "", filename, data_bytes, int(len(data_bytes)), int(record_count)],
+                "INSERT INTO uploads (token, run_id, username, filename, data_bytes, size_bytes, record_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    token,
+                    run_id or "",
+                    username or "",
+                    filename,
+                    data_bytes,
+                    int(len(data_bytes)),
+                    int(record_count),
+                ],
             )
         finally:
             con.close()
@@ -286,19 +323,35 @@ class Database:
     def get_upload_meta(self, token: str) -> Optional[Dict[str, Any]]:
         con = self.connect()
         try:
-            row = con.execute("SELECT filename, record_count, size_bytes FROM uploads WHERE token = ?", [token]).fetchone()
+            row = con.execute(
+                "SELECT filename, record_count, size_bytes, run_id FROM uploads WHERE token = ?",
+                [token],
+            ).fetchone()
             if not row:
                 return None
-            return {"filename": row[0], "record_count": int(row[1] or 0), "size_bytes": int(row[2] or 0)}
+            return {
+                "filename": row[0],
+                "record_count": int(row[1] or 0),
+                "size_bytes": int(row[2] or 0),
+                "run_id": row[3] or "",
+            }
         finally:
             con.close()
 
-    def save_validation_snapshot(self, token: str, columns_json: str, role_selection_json: str, time_date_only: bool, passed: bool) -> None:
+    def save_validation_snapshot(
+        self,
+        token: str,
+        columns_json: str,
+        role_selection_json: str,
+        time_date_only: bool,
+        passed: bool,
+        run_id: Optional[str] = None,
+    ) -> None:
         con = self.connect()
         try:
             con.execute(
-                "UPDATE uploads SET columns_json = ?, role_selection_json = ?, time_date_only = ?, validated_passed = ? WHERE token = ?",
-                [columns_json, role_selection_json, bool(time_date_only), bool(passed), token],
+                "UPDATE uploads SET columns_json = ?, role_selection_json = ?, time_date_only = ?, validated_passed = ?, run_id = COALESCE(NULLIF(?, ''), run_id) WHERE token = ?",
+                [columns_json, role_selection_json, bool(time_date_only), bool(passed), run_id or "", token],
             )
         finally:
             con.close()
@@ -307,7 +360,7 @@ class Database:
         con = self.connect()
         try:
             row = con.execute(
-                "SELECT columns_json, role_selection_json, time_date_only, validated_passed FROM uploads WHERE token = ?",
+                "SELECT columns_json, role_selection_json, time_date_only, validated_passed, run_id FROM uploads WHERE token = ?",
                 [token],
             ).fetchone()
             if not row:
@@ -317,6 +370,7 @@ class Database:
                 "role_selection_json": row[1],
                 "time_date_only": bool(row[2]) if row[2] is not None else False,
                 "validated_passed": bool(row[3]) if row[3] is not None else False,
+                "run_id": row[4] or "",
             }
         finally:
             con.close()
@@ -353,6 +407,11 @@ class Database:
         dag_run_id: Optional[str] = None,
         source_code: Optional[str] = None,
         comments: Optional[str] = None,
+        bucket: Optional[str] = None,
+        object_key: Optional[str] = None,
+        s3_uri: Optional[str] = None,
+        status: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> None:
         con = self.connect()
         try:
@@ -370,10 +429,40 @@ class Database:
             if comments is not None:
                 updates.append("comments = ?")
                 params.append(comments)
+            if status is not None:
+                updates.append("status = ?")
+                params.append(status)
+            if run_id is not None:
+                updates.append("run_id = ?")
+                params.append(run_id)
             if not updates:
-                return
+                updates.append("created_at = created_at")
             params.append(token)
             con.execute(f"UPDATE upload_logs SET {', '.join(updates)} WHERE token = ?", params)
+            existing = con.execute("SELECT 1 FROM upload_logs WHERE token = ?", [token]).fetchone()
+            if not existing and (bucket or object_key or s3_uri):
+                con.execute(
+                    """
+                    INSERT INTO upload_logs (
+                      id, token, run_id, username, bucket, object_key, s3_uri, cleaned, status, comments, dag_status, dag_run_id, source_code
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        self._new_id(),
+                        token,
+                        run_id or "",
+                        "",
+                        bucket or "",
+                        object_key or "",
+                        s3_uri or "",
+                        True,
+                        status or (dag_status or ""),
+                        comments or "",
+                        dag_status or "",
+                        dag_run_id or "",
+                        source_code or "",
+                    ],
+                )
         finally:
             con.close()
 
@@ -395,32 +484,49 @@ class Database:
                     SELECT token FROM latest_upload
                     UNION
                     SELECT token FROM latest_validation
+                    UNION
+                    SELECT token FROM uploads
                 )
                 SELECT
-                    COALESCE(u.created_at, v.created_at, up.created_at) AS event_time,
-                    COALESCE(u.username, v.username, '') AS username,
-                    up.filename,
                     CASE
-                        WHEN v.token IS NULL THEN 'Not run'
-                        WHEN v.passed THEN 'Success'
-                        ELSE 'Failed'
+                        WHEN u.created_at IS NOT NULL OR v.created_at IS NOT NULL OR up.created_at IS NOT NULL THEN
+                            GREATEST(
+                                COALESCE(u.created_at, TIMESTAMP '1970-01-01 00:00:00'),
+                                COALESCE(v.created_at, TIMESTAMP '1970-01-01 00:00:00'),
+                                COALESCE(up.created_at, TIMESTAMP '1970-01-01 00:00:00')
+                            )
+                        ELSE NULL
+                    END AS event_time,
+                    COALESCE(u.username, v.username, up.username, '') AS username,
+                    COALESCE(up.filename, u.object_key, '') AS filename,
+                    CASE
+                        WHEN v.token IS NOT NULL THEN
+                            CASE WHEN v.passed THEN 'Success' ELSE 'Failed' END
+                        WHEN up.validated_passed IS NOT NULL THEN
+                            CASE WHEN up.validated_passed THEN 'Success' ELSE 'Failed' END
+                        ELSE 'Not run'
                     END AS validation_status,
                     COALESCE(v.failed_columns, '') AS validation_comments,
                     CASE
-                        WHEN u.status IS NULL OR u.status = '' THEN 'Not uploaded'
-                        ELSE u.status
+                        WHEN u.token IS NULL THEN 'Not uploaded'
+                        WHEN COALESCE(u.status, '') <> '' THEN u.status
+                        WHEN COALESCE(u.object_key, '') <> '' THEN 'Success'
+                        ELSE 'Not uploaded'
                     END AS upload_status,
                     COALESCE(u.object_key, '') AS upload_key,
                     COALESCE(u.comments, '') AS upload_comments,
                     CASE
-                        WHEN u.dag_status IS NULL OR u.dag_status = '' THEN 'Not triggered'
-                        ELSE u.dag_status
+                        WHEN u.token IS NULL THEN 'Not triggered'
+                        WHEN COALESCE(u.dag_status, '') <> '' THEN u.dag_status
+                        ELSE 'Not triggered'
                     END AS airflow_status,
                     CASE
-                        WHEN u.source_code IS NULL OR u.source_code = '' THEN 'N/A'
+                        WHEN COALESCE(u.source_code, '') = '' THEN 'N/A'
                         ELSE u.source_code
                     END AS source_code,
-                    COALESCE(u.dag_run_id, '') AS dag_run_id
+                    COALESCE(u.dag_run_id, '') AS dag_run_id,
+                    COALESCE(up.run_id, u.run_id, v.run_id, '') AS run_id,
+                    t.token AS token
                 FROM tokens t
                 LEFT JOIN latest_upload u ON u.token = t.token AND u.rn = 1
                 LEFT JOIN latest_validation v ON v.token = t.token AND v.rn = 1
@@ -431,7 +537,7 @@ class Database:
             where_clause = ""
             params: list[object] = []
             if username:
-                where_clause = "WHERE COALESCE(u.username, v.username, '') = ?"
+                where_clause = "WHERE COALESCE(u.username, v.username, up.username, '') = ?"
                 params.append(username)
             rows = con.execute(query.format(where_clause=where_clause), params).fetchall()
             cols = [
@@ -446,6 +552,8 @@ class Database:
                 "airflow_status",
                 "source_code",
                 "dag_run_id",
+                "run_id",
+                "token",
             ]
             results = []
             for row in rows:
@@ -486,5 +594,7 @@ class Database:
             return result
         finally:
             con.close()
+
+
 
 

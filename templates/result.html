@@ -28,7 +28,7 @@
         Airflow trigger failed: {{ airflow_error }}.
       </div>
     {% endif %}
-    <a href="/" class="btn btn-outline-primary mt-3">Start over</a>
+    <a href="/?reset=1" class="btn btn-outline-primary mt-3" data-role="start-over">Start over</a>
   {% else %}
     <div class="alert alert-danger">Upload failed: {{ error }}</div>
     {% if trace %}<pre class="small">{{ trace }}</pre>{% endif %}
@@ -48,7 +48,21 @@
       const tasksEl = card.querySelector('[data-role="tasks"]');
       const errorEl = card.querySelector('[data-role="tasks-error"]');
       const sourceEl = card.querySelector('[data-role="source-code"]');
+      const startBtn = document.querySelector('[data-role="start-over"]');
+      const disableStart = () => {
+        if (!startBtn) return;
+        startBtn.classList.add('disabled', 'pe-none', 'opacity-50');
+        startBtn.setAttribute('aria-disabled', 'true');
+      };
+      const enableStart = () => {
+        if (!startBtn) return;
+        startBtn.classList.remove('disabled', 'pe-none', 'opacity-50');
+        startBtn.removeAttribute('aria-disabled');
+      };
       const capitalizeWords = (value) => String(value || '').replace(/\b\w/g, (ch) => ch.toUpperCase());
+      if (startBtn) {
+        disableStart();
+      }
       const normalizeLog = (value) => {
         let text = String(value || '');
         text = text.replace(/\r\n/g, '\n');
@@ -79,6 +93,7 @@
               sourceEl.textContent = 'N/A';
             }
             polling = false;
+            enableStart();
             return;
           }
           const data = await resp.json();
@@ -130,6 +145,7 @@
             setTimeout(pollStatus, 5000);
           } else {
             polling = false;
+            enableStart();
           }
         } catch (err) {
           messageEl.textContent = 'Error fetching Airflow status.';
@@ -137,6 +153,7 @@
             sourceEl.textContent = 'N/A';
           }
           polling = false;
+          enableStart();
         }
       }
 
@@ -145,5 +162,9 @@
   </script>
 {% endif %}
 {% endblock %}
+
+
+
+
 
 
