@@ -5,11 +5,12 @@
 
   <div class="card">
     <div class="card-body p-0">
-      <div class="table-responsive">
-        <table class="table table-sm table-striped mb-0">
+      <div class="table-responsive" style="max-height: 70vh; overflow-y: auto;">
+        <table class="table table-sm table-striped mb-0" data-role="pipeline-table" data-dag-id="{{ airflow_dag_id or '' }}">
           <thead class="table-light">
             <tr>
               <th>Time</th>
+              <th>Tracking ID</th>
               <th>User</th>
               <th>Filename</th>
               <th>Validation status</th>
@@ -25,8 +26,9 @@
           <tbody>
             {% if pipeline_logs %}
               {% for row in pipeline_logs %}
-                <tr>
+                <tr data-token="{{ row.token or '' }}" data-dag-run-id="{{ row.dag_run_id or '' }}" data-airflow-status="{{ row.airflow_status or '' }}">
                   <td>{{ row.event_time or '' }}</td>
+                  <td><code>{{ row.run_id or '' }}</code></td>
                   <td>{{ row.username or '' }}</td>
                   <td>{{ row.filename or '' }}</td>
                   <td>{{ row.validation_status or 'Not run' }}</td>
@@ -34,14 +36,14 @@
                   <td>{{ row.upload_status or '' }}</td>
                   <td><code>{{ row.upload_key or '' }}</code></td>
                   <td>{{ row.upload_comments or '' }}</td>
-                  <td>{{ row.airflow_status or 'Not triggered' }}</td>
-                  <td>{{ row.source_code or 'N/A' }}</td>
-                  <td><code>{{ row.dag_run_id or '' }}</code></td>
+                  <td data-col="airflow-status">{{ row.airflow_status or 'Not triggered' }}</td>
+                  <td data-col="source-code">{{ row.source_code or 'N/A' }}</td>
+                  <td data-col="dag-run-id"><code>{{ row.dag_run_id or '' }}</code></td>
                 </tr>
               {% endfor %}
             {% else %}
               <tr>
-                <td colspan="11" class="text-center text-muted py-3">No log entries found.</td>
+                <td colspan="12" class="text-center text-muted py-3">No log entries found.</td>
               </tr>
             {% endif %}
           </tbody>
@@ -49,4 +51,63 @@
       </div>
     </div>
   </div>
+  <script>
+    (function () {
+      const table = document.querySelector('[data-role="pipeline-table"]');
+      if (!table) {
+        return;
+      }
+      const dagId = (table.getAttribute('data-dag-id') || '').trim();
+      if (!dagId) {
+        return;
+      }
+      const terminalStates = new Set(['success', 'failed', 'error', 'upstream_failed', 'upstream failed']);
+      const toTitle = (value) => String(value || '').replace(/_/g, ' ').replace(/\b\w/g, (ch) => ch.toUpperCase());
+
+      table.querySelectorAll('tbody tr[data-token]').forEach((row) => {
+        const runId = (row.getAttribute('data-dag-run-id') || '').trim();
+        if (!runId) {
+          return;
+        }
+        const currentState = (row.getAttribute('data-airflow-status') || '').toLowerCase();
+        if (terminalStates.has(currentState)) {
+          return;
+        }
+        const tokenValue = (row.getAttribute('data-token') || '').trim();
+        const params = new URLSearchParams({ dag_id: dagId, dag_run_id: runId });
+        if (tokenValue) {
+          params.append('token', tokenValue);
+        }
+        fetch(`/airflow/run-status?${params.toString()}`)
+          .then((resp) => (resp.ok ? resp.json() : null))
+          .then((data) => {
+            if (!data) {
+              return;
+            }
+            const stateValue = toTitle(data.state || currentState);
+            if (stateValue) {
+              row.setAttribute('data-airflow-status', stateValue);
+              const statusCell = row.querySelector('[data-col="airflow-status"]');
+              if (statusCell) {
+                statusCell.textContent = stateValue;
+              }
+            }
+            if (Object.prototype.hasOwnProperty.call(data, 'source_code') && data.source_code) {
+              const sourceCell = row.querySelector('[data-col="source-code"]');
+              if (sourceCell) {
+                sourceCell.textContent = data.source_code;
+              }
+            }
+            if (data.dag_run_id) {
+              const runCell = row.querySelector('[data-col="dag-run-id"]');
+              if (runCell) {
+                runCell.textContent = data.dag_run_id;
+              }
+            }
+          })
+          .catch(() => {});
+      });
+    })();
+  </script>
 {% endblock %}
+

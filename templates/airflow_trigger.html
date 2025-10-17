@@ -37,6 +37,7 @@
 
   <form method="post" action="/airflow-trigger" class="mt-3">
     <input type="hidden" name="token" value="{{ token }}" />
+    <input type="hidden" name="run_id" value="{{ run_id or '' }}" />
     {% if airflow_ready %}<fieldset>{% else %}<fieldset disabled>{% endif %}
       <div class="row g-3">
         <div class="col-md-4 d-flex align-items-end">
