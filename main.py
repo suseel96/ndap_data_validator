@@ -48,6 +48,50 @@ DB = Database()
 DB.init()
 DB.ensure_default_admin()
 
+
+def _get_session_steps(request: Request) -> set[int]:
+    raw = request.session.get("step_progress")
+    if not raw:
+        return set()
+    steps: set[int] = set()
+    for value in raw:
+        try:
+            steps.add(int(value))
+        except Exception:
+            continue
+    return steps
+
+
+def _set_session_steps(request: Request, steps: set[int]) -> None:
+    request.session["step_progress"] = sorted(int(s) for s in steps)
+
+
+def _add_session_step(request: Request, step: int) -> None:
+    steps = _get_session_steps(request)
+    steps.add(int(step))
+    _set_session_steps(request, steps)
+
+
+def _set_active_token(request: Request, token: str) -> None:
+    if token:
+        request.session["active_token"] = token
+
+
+def _get_active_token(request: Request) -> str | None:
+    return request.session.get("active_token")
+
+
+def _clear_active_run(request: Request) -> None:
+    request.session.pop("active_token", None)
+    request.session.pop("step_progress", None)
+
+
+def _combined_steps(request: Request, token: str | None) -> set[int]:
+    steps = _get_session_steps(request)
+    if token and token in STEP_COMPLETION:
+        steps |= STEP_COMPLETION[token]
+    return steps
+
 def get_username(request: Request) -> str | None:
     return request.session.get("username")
 
@@ -212,16 +256,19 @@ async def index(request: Request, reset: str | None = None):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
     run_id = request.session.get("current_run_id")
+    active_token = request.session.get("active_token")
     if reset and reset.lower() in {"1", "true", "yes"}:
+        _clear_active_run(request)
         run_id = _reset_run_id(request)
     elif not run_id:
         run_id = _reset_run_id(request)
+    completed_steps = _get_session_steps(request)
     return templates.TemplateResponse("upload.html", {
         "request": request, 
         "active_step": 1, 
         "title": "Upload",
-        "completed_steps": set(),
-        "token": None,
+        "completed_steps": completed_steps,
+        "token": active_token,
         "run_id": run_id,
     })
 
@@ -265,6 +312,8 @@ async def preview(
             "run_id": run_id,
         }
         STEP_COMPLETION[token] = {1}
+        _set_active_token(request, token)
+        _set_session_steps(request, {1})
         return templates.TemplateResponse(
             "preview.html",
             {
@@ -279,15 +328,24 @@ async def preview(
                 "record_count": record_count,
                 "active_step": 2,
                 "title": "Select types",
-                "completed_steps": STEP_COMPLETION.get(token, set()),
+                "completed_steps": _combined_steps(request, token),
                 "run_id": run_id,
             },
         )
     except Exception as ex:
+        _clear_active_run(request)
         run_id = _reset_run_id(request)
         return templates.TemplateResponse(
             "upload.html",
-            {"request": request, "error": f"Failed to read CSV: {ex}", "run_id": run_id, "active_step": 1, "title": "Upload", "completed_steps": set(), "token": None},
+            {
+                "request": request,
+                "error": f"Failed to read CSV: {ex}",
+                "run_id": run_id,
+                "active_step": 1,
+                "title": "Upload",
+                "completed_steps": _get_session_steps(request),
+                "token": _get_active_token(request),
+            },
         )
 
 
@@ -296,6 +354,9 @@ async def preview_get(request: Request, token: str | None = None):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
     if not token:
+        token = _get_active_token(request)
+        if token:
+            return RedirectResponse(url=f"/preview?token={token}", status_code=302)
         return RedirectResponse(url="/", status_code=302)
     # Re-render preview/selection by reading back from stored bytes
     content = _get_data_bytes(token)
@@ -309,6 +370,7 @@ async def preview_get(request: Request, token: str | None = None):
     state = VALIDATION_STATE.get(token, {})
     schema = state.get("schema", "National")
     meta = _get_meta(token)
+    _set_active_token(request, token)
     return templates.TemplateResponse(
         "preview.html",
         {
@@ -323,7 +385,7 @@ async def preview_get(request: Request, token: str | None = None):
             "record_count": meta.get("record_count", 0),
             "active_step": 2,
             "title": "Select types",
-            "completed_steps": STEP_COMPLETION.get(token, set()),
+            "completed_steps": _combined_steps(request, token),
             "run_id": meta.get("run_id", ""),
         },
     )
@@ -334,7 +396,7 @@ async def validate(request: Request):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
     form = await request.form()
-    token = str(form.get("token"))
+    token = str(form.get("token") or (_get_active_token(request) or ""))
     columns_serialized = str(form.get("columns", ""))
     columns: List[str] = [c for c in columns_serialized.split("|||") if c]
     run_id_raw = str(form.get("run_id") or "").strip()
@@ -351,9 +413,19 @@ async def validate(request: Request):
 
     try:
         if not _get_data_bytes(token):
+            _clear_active_run(request)
+            run_id = _reset_run_id(request)
             return templates.TemplateResponse(
                 "upload.html",
-                {"request": request, "error": "Session expired or file not found. Please re-upload your CSV."},
+                {
+                    "request": request,
+                    "error": "Session expired or file not found. Please re-upload your CSV.",
+                    "run_id": run_id,
+                    "active_step": 1,
+                    "title": "Upload",
+                    "completed_steps": _get_session_steps(request),
+                    "token": None,
+                },
             )
         data = _get_data_bytes(token)
         df = _read_df_from_bytes(data)
@@ -413,6 +485,11 @@ async def validate(request: Request):
         if passed:
             STEP_COMPLETION[token].add(3)
 
+        _set_active_token(request, token)
+        _add_session_step(request, 2)
+        if passed:
+            _add_session_step(request, 3)
+
         resp = templates.TemplateResponse(
             "validate.html",
             {
@@ -431,7 +508,7 @@ async def validate(request: Request):
                 "record_count": meta.get("record_count", 0),
                 "active_step": 3,
                 "title": "Validate",
-                "completed_steps": STEP_COMPLETION.get(token, set()),
+                "completed_steps": _combined_steps(request, token),
                 "run_id": run_id,
             },
         )
@@ -454,17 +531,18 @@ async def validate(request: Request):
         return resp
     except Exception as ex:
         trace = traceback.format_exc()
-        meta = _get_meta(token)
+        _clear_active_run(request)
+        run_id = _reset_run_id(request)
         return templates.TemplateResponse(
             "upload.html",
             {
                 "request": request,
                 "error": f"Validation failed: {ex}",
                 "trace": trace,
-                "run_id": meta.get("run_id", ""),
+                "run_id": run_id,
                 "active_step": 1,
                 "title": "Upload",
-                "completed_steps": set(),
+                "completed_steps": _get_session_steps(request),
                 "token": None,
             },
         )
@@ -475,6 +553,9 @@ async def validate_get(request: Request, token: str | None = None):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
     if not token:
+        token = _get_active_token(request)
+        if token:
+            return RedirectResponse(url=f"/validate?token={token}", status_code=302)
         return RedirectResponse(url="/", status_code=302)
     state = VALIDATION_STATE.get(token)
     if not state:
@@ -490,6 +571,7 @@ async def validate_get(request: Request, token: str | None = None):
     meta = _get_meta(token)
     if meta.get("run_id") and not state.get("run_id"):
         state["run_id"] = meta.get("run_id")
+    _set_active_token(request, token)
     return templates.TemplateResponse(
         "validate.html",
         {
@@ -508,7 +590,7 @@ async def validate_get(request: Request, token: str | None = None):
             "record_count": meta.get("record_count", 0),
             "active_step": 3,
             "title": "Validate",
-            "completed_steps": STEP_COMPLETION.get(token, set()),
+            "completed_steps": _combined_steps(request, token),
             "run_id": state.get("run_id") or meta.get("run_id", ""),
         },
     )
@@ -519,6 +601,9 @@ async def upload_get(request: Request, token: str | None = None):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
     if not token:
+        token = _get_active_token(request)
+        if token:
+            return RedirectResponse(url=f"/upload?token={token}", status_code=302)
         return RedirectResponse(url="/", status_code=302)
     state = VALIDATION_STATE.get(token)
     if not state or not state.get("passed", False):
@@ -551,6 +636,8 @@ async def upload_get(request: Request, token: str | None = None):
                 STEP_COMPLETION[token] = set()
             STEP_COMPLETION[token].add(2)
             STEP_COMPLETION[token].add(3)
+            _add_session_step(request, 2)
+            _add_session_step(request, 3)
         else:
             # No snapshot/passed info, route back appropriately
             if not state:
@@ -561,6 +648,8 @@ async def upload_get(request: Request, token: str | None = None):
     if token not in STEP_COMPLETION:
         STEP_COMPLETION[token] = set()
     STEP_COMPLETION[token].add(3)
+    _set_active_token(request, token)
+    _add_session_step(request, 3)
 
     # Check required settings for Step 4 (S3 only)
     s3_bucket_cfg = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
@@ -592,7 +681,7 @@ async def upload_get(request: Request, token: str | None = None):
             "s3_folder_value": s3_folder_value,
             "active_step": 4,
             "title": "Upload",
-            "completed_steps": STEP_COMPLETION.get(token, set()),
+            "completed_steps": _combined_steps(request, token),
             "run_id": state.get("run_id") or meta.get("run_id", ""),
         },
     )
@@ -622,9 +711,16 @@ async def upload(
     run_id = run_id_form or state.get("run_id") or meta.get("run_id", "")
     if run_id and not state.get("run_id"):
         state["run_id"] = run_id
+    _set_active_token(request, token)
 
     existing_upload = state.get("s3_upload")
     if existing_upload and existing_upload.get("s3_uri"):
+        if token not in STEP_COMPLETION:
+            STEP_COMPLETION[token] = set()
+        STEP_COMPLETION[token].add(3)
+        STEP_COMPLETION[token].add(4)
+        _add_session_step(request, 3)
+        _add_session_step(request, 4)
         return RedirectResponse(url=f"/airflow-trigger?token={token}", status_code=303)
 
     s3_bucket = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
@@ -650,7 +746,7 @@ async def upload(
             "missing_settings": missing_settings,
             "active_step": 4,
             "title": "Upload",
-            "completed_steps": STEP_COMPLETION.get(token, set()),
+            "completed_steps": _combined_steps(request, token),
             "error": message,
             "trace": trace,
             "object_key_value": form_defaults.get("object_key", ""),
@@ -661,15 +757,17 @@ async def upload(
 
     try:
         if not _get_data_bytes(token):
+            _clear_active_run(request)
+            run_id = _reset_run_id(request)
             return templates.TemplateResponse(
                 "upload.html",
                 {
                     "request": request,
                     "error": "Session expired or file not found. Please re-upload your CSV.",
-                    "run_id": _reset_run_id(request),
+                    "run_id": run_id,
                     "active_step": 1,
                     "title": "Upload",
-                    "completed_steps": set(),
+                    "completed_steps": _get_session_steps(request),
                     "token": None,
                 },
             )
@@ -721,6 +819,9 @@ async def upload(
             STEP_COMPLETION[token] = set()
         STEP_COMPLETION[token].add(3)
         STEP_COMPLETION[token].add(4)
+        _set_active_token(request, token)
+        _add_session_step(request, 3)
+        _add_session_step(request, 4)
 
         state["s3_upload"] = {
             "bucket": s3_bucket,
@@ -755,6 +856,9 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
     if not token:
+        token = _get_active_token(request)
+        if token:
+            return RedirectResponse(url=f"/airflow-trigger?token={token}", status_code=302)
         return RedirectResponse(url="/", status_code=302)
     state = VALIDATION_STATE.get(token)
     if not state or "s3_upload" not in state:
@@ -763,6 +867,9 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
         STEP_COMPLETION[token] = set()
     STEP_COMPLETION[token].add(3)
     STEP_COMPLETION[token].add(4)
+    _set_active_token(request, token)
+    _add_session_step(request, 3)
+    _add_session_step(request, 4)
 
     s3_info = state["s3_upload"]
     s3_bucket = s3_info.get("bucket", "")
@@ -800,7 +907,7 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
         "record_count": meta.get("record_count", 0),
         "active_step": 5,
         "title": "Trigger Airflow",
-        "completed_steps": STEP_COMPLETION.get(token, set()),
+        "completed_steps": _combined_steps(request, token),
         "error": None,
         "trace": None,
         "run_id": meta.get("run_id", ""),
@@ -823,6 +930,8 @@ async def airflow_trigger_post(
         return RedirectResponse(url=f"/upload?token={token}", status_code=302)
     if token not in STEP_COMPLETION:
         STEP_COMPLETION[token] = set()
+    _set_active_token(request, token)
+    _add_session_step(request, 4)
     s3_info = state["s3_upload"]
     s3_bucket = s3_info.get("bucket")
     s3_object_key = s3_info.get("object_key")
@@ -833,6 +942,8 @@ async def airflow_trigger_post(
 
     existing_run = state.get("airflow_run")
     if existing_run and existing_run.get("dag_run_id"):
+        STEP_COMPLETION[token].add(5)
+        _add_session_step(request, 5)
         return RedirectResponse(url=f"/airflow-trigger?token={token}", status_code=303)
 
     inc_bool = is_incremental == "on"
@@ -874,7 +985,7 @@ async def airflow_trigger_post(
             "record_count": refreshed_meta.get("record_count", 0),
             "active_step": 5,
             "title": "Trigger Airflow",
-            "completed_steps": STEP_COMPLETION.get(token, set()),
+            "completed_steps": _combined_steps(request, token),
             "error": message,
             "trace": trace,
             "run_id": resolved_run_id or refreshed_meta.get("run_id", ""),
@@ -915,6 +1026,7 @@ async def airflow_trigger_post(
         airflow_run_url = f"{airflow_base.rstrip('/')}{run_path}"
         airflow_embed_url = f"{embed_base.rstrip('/')}{run_path}"
         STEP_COMPLETION[token].add(5)
+        _add_session_step(request, 5)
         try:
             DB.update_upload_airflow(
                 token,
@@ -973,7 +1085,7 @@ async def airflow_trigger_post(
             "title": "Trigger Airflow",
             "token": token,
             "columns": columns_state,
-            "completed_steps": STEP_COMPLETION.get(token, set()),
+            "completed_steps": _combined_steps(request, token),
             "run_id": meta.get("run_id", ""),
         },
     )
