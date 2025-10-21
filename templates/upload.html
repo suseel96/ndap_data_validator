@@ -2,16 +2,24 @@
 
 {% block content %}
   <div class="page-header d-flex align-items-center justify-content-between mb-3">
-    <h4 class="m-0">Step 1: Upload CSV</h4>
+    <h4 class="m-0">Step 1: Upload CSV or Enter S3 Folder</h4>
   </div>
   <div class="card p-3 card-narrow">
-    <form method="post" action="/preview" enctype="multipart/form-data">
+    <form method="post" action="/preview" enctype="multipart/form-data" id="startForm">
       <input type="hidden" name="run_id" value="{{ run_id or '' }}" />
+
       <div class="mb-3">
         <label class="form-label">Upload CSV file</label>
-        <input type="file" name="file" accept=".csv" class="form-control" required />
-        <div class="form-text">Accepted format: .csv. First 10 rows will be shown in preview.</div>
+        <input type="file" name="file" accept=".csv" class="form-control" />
+        <div class="form-text">If your file is larger than 300MB, please split it and use the S3 folder option below.</div>
       </div>
+
+      <div class="mb-3">
+        <label class="form-label">Or provide an S3 folder path</label>
+        <input type="text" name="s3_folder" class="form-control" placeholder="e.g. s3://my-bucket/path/to/folder/ or just path/to/folder/" />
+        <div class="form-text">We’ll sample 10 rows from one CSV for preview, then validate all CSV files in this folder.</div>
+      </div>
+
       <div class="mb-3">
         <label class="form-label">Choose dataset type</label>
         <div>
@@ -29,9 +37,28 @@
       <div class="d-flex gap-2">
         <button class="btn btn-primary" type="submit">Preview</button>
       </div>
+      <div class="form-text mt-2">Tip: Provide either a CSV file or an S3 folder. If both are provided, the S3 folder will be used.</div>
     </form>
   </div>
+
+  <script>
+    // Client-side guard + dynamic loader message
+    document.getElementById('startForm').addEventListener('submit', function(e){
+      const file = this.querySelector('input[name="file"]').files[0];
+      const s3 = (this.querySelector('input[name="s3_folder"]').value || '').trim();
+      if (!file && !s3) {
+        e.preventDefault();
+        alert('Please upload a CSV or provide an S3 folder path.');
+        return;
+      }
+      // Show loader with appropriate message
+      if (typeof window.showLoader === 'function') {
+        if (s3) {
+          window.showLoader('Reading sample from S3 and preparing preview...');
+        } else {
+          window.showLoader('Uploading file and preparing preview...');
+        }
+      }
+    });
+  </script>
 {% endblock %}
-
-
-

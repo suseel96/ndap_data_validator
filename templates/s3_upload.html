@@ -12,7 +12,7 @@
       <a href="/admin/settings" class="alert-link">Open Settings</a>
     </div>
   {% endif %}
-  <form method="post" action="/upload" class="mt-3">
+  <form method="post" action="/upload" class="mt-3" id="s3UploadForm">
     <input type="hidden" name="token" value="{{ token }}" />
     <input type="hidden" name="columns" value="{{ '|||' . join(columns) }}" />{% for col in columns %}
       <input type="hidden" name="role_{{ col }}" value="{{ role_selection[col] }}" />
@@ -39,6 +39,13 @@
     {% if not settings_ready %}</fieldset>{% endif %}
     <button class="btn btn-primary mt-3" type="submit">Upload to S3</button>
   </form>
+  <script>
+    document.getElementById('s3UploadForm')?.addEventListener('submit', function(){
+      if (typeof window.showLoader === 'function') {
+        window.showLoader('Uploading validated data to S3...');
+      }
+    });
+  </script>
 {% endblock %}
 
 
