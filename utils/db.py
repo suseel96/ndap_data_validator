@@ -574,6 +574,32 @@ class Database:
         finally:
             con.close()
 
+    def get_latest_upload_log(self, token: str) -> Optional[Dict[str, Any]]:
+        con = self.connect()
+        try:
+            row = con.execute(
+                (
+                    "SELECT bucket, object_key, s3_uri, status, comments, dag_status, dag_run_id, run_id, created_at "
+                    "FROM upload_logs WHERE token = ? ORDER BY created_at DESC LIMIT 1"
+                ),
+                [token],
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "bucket": row[0] or "",
+                "object_key": row[1] or "",
+                "s3_uri": row[2] or "",
+                "status": row[3] or "",
+                "comments": row[4] or "",
+                "dag_status": row[5] or "",
+                "dag_run_id": row[6] or "",
+                "run_id": row[7] or "",
+                "created_at": str(row[8]) if row[8] else "",
+            }
+        finally:
+            con.close()
+
 
 
     # Settings helpers

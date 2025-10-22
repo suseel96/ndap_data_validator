@@ -1113,7 +1113,30 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
         return RedirectResponse(url="/", status_code=302)
     state = VALIDATION_STATE.get(token)
     if not state or ("s3_upload" not in state and "s3_folder_info" not in state):
-        return RedirectResponse(url=f"/upload?token={token}", status_code=302)
+        # Try to reconstruct S3 upload state from DB to avoid repeated prompts on multi-worker servers
+        rebuilt = False
+        try:
+            ul = DB.get_latest_upload_log(token)
+            if ul and (ul.get("s3_uri") or ul.get("object_key")):
+                if not state:
+                    state = VALIDATION_STATE.setdefault(token, {})
+                state["s3_upload"] = {
+                    "bucket": ul.get("bucket", ""),
+                    "object_key": ul.get("object_key", ""),
+                    "s3_uri": ul.get("s3_uri", ""),
+                    # folder not stored; best-effort derive from key's leading path
+                    "folder": (ul.get("object_key", "").rpartition('/')[0] if ul.get("object_key") else ""),
+                }
+                rebuilt = True
+                # ensure steps 3 and 4 marked
+                if token not in STEP_COMPLETION:
+                    STEP_COMPLETION[token] = set()
+                STEP_COMPLETION[token].add(3)
+                STEP_COMPLETION[token].add(4)
+        except Exception:
+            pass
+        if not rebuilt:
+            return RedirectResponse(url=f"/upload?token={token}", status_code=302)
     if token not in STEP_COMPLETION:
         STEP_COMPLETION[token] = set()
     STEP_COMPLETION[token].add(3)
