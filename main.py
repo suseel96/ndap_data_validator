@@ -1150,6 +1150,17 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
     airflow_params = state.get("airflow_params", {})
     is_incremental = bool(airflow_params.get("is_incremental"))
     schema_exists = bool(airflow_params.get("schema_exists"))
+    delta_with_structure_change = bool(airflow_params.get("delta_with_structure_change"))
+
+    # Derive load mode
+    if delta_with_structure_change:
+        load_mode = "structure_change"
+    elif is_incremental and schema_exists:
+        load_mode = "delta"
+    elif (not is_incremental) and schema_exists:
+        load_mode = "full_reload"
+    else:
+        load_mode = "new"
 
     meta = _get_meta(token)
     context = {
@@ -1159,8 +1170,7 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
         "s3_object_key": s3_object_key,
         "s3_uri": s3_uri,
         "s3_folder": s3_folder,
-        "is_incremental": is_incremental,
-        "schema_exists": schema_exists,
+        "load_mode": load_mode,
         "airflow_ready": settings_ready,
         "missing_settings": missing_settings,
         "uploaded_recently": uploaded == "1",
@@ -1181,6 +1191,7 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
 async def airflow_trigger_post(
     request: Request,
     token: str = Form(...),
+    load_mode: str | None = Form(None),
     is_incremental: str | None = Form(None),
     schema_exists: str | None = Form(None),
     run_id: str | None = Form(None),
@@ -1221,9 +1232,25 @@ async def airflow_trigger_post(
         _add_session_step(request, 5)
         return RedirectResponse(url=f"/airflow-trigger?token={token}", status_code=303)
 
-    inc_bool = is_incremental == "on"
-    schema_bool = True if inc_bool else (schema_exists == "on")
-    state["airflow_params"] = {"is_incremental": inc_bool, "schema_exists": schema_bool}
+    # Map UI selection
+    inc_bool = False
+    schema_bool = False
+    delta_struct_bool = False
+    mode = (load_mode or "").strip().lower()
+    if mode in {"new", "full_reload", "delta", "structure_change"}:
+        if mode == "new":
+            inc_bool = False; schema_bool = False; delta_struct_bool = False
+        elif mode == "full_reload":
+            inc_bool = False; schema_bool = True; delta_struct_bool = False
+        elif mode == "delta":
+            inc_bool = True; schema_bool = True; delta_struct_bool = False
+        elif mode == "structure_change":
+            inc_bool = False; schema_bool = False; delta_struct_bool = True
+    else:
+        inc_bool = is_incremental == "on"
+        schema_bool = True if inc_bool else (schema_exists == "on")
+        delta_struct_bool = False
+    state["airflow_params"] = {"is_incremental": inc_bool, "schema_exists": schema_bool, "delta_with_structure_change": delta_struct_bool}
 
     airflow_base, username, password = _get_airflow_config()
     airflow_dag_id_val = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
@@ -1275,24 +1302,23 @@ async def airflow_trigger_post(
     usr = username
     pwd = password
 
-    # Build conf
+    # Build conf (include delta_with_structure_change)
     if s3_folder_mode:
-        # Ensure backward compatibility: many DAGs expect `source_code`.
-        # Provide both `source_code` (prefix) and `s3_folder` (full URI).
+        # Prefer override
+        src_override = (state.get("source_code_override") or "").strip() if isinstance(state, dict) else ""
+        source_code_value = src_override or folder_value
         conf_obj = {
-            "source_code": folder_value,    # prefix (e.g., path/to/folder/)
-            "s3_folder": s3_uri,            # full URI (e.g., s3://bucket/path/to/folder/)
-            "arg1": "yes" if inc_bool else "no",
-            "arg2": "yes" if schema_bool else "no",
-            "token": token,
+            "source_code": source_code_value,
+            "is_incremental": "yes" if inc_bool else "no",
+            "schema_exist": "yes" if schema_bool else "no",
+            "delta_with_structure_change": "yes" if delta_struct_bool else "no",
         }
     else:
         conf_obj = {
             "source_code": folder_value,
-            "arg1": "yes" if inc_bool else "no",
-            "arg2": "yes" if schema_bool else "no",
-            "s3_uri": s3_uri,
-            "token": token,
+            "is_incremental": "yes" if inc_bool else "no",
+            "schema_exist": "yes" if schema_bool else "no",
+            "delta_with_structure_change": "yes" if delta_struct_bool else "no",
         }
     ok, info = trigger_airflow_dag(airflow_base, dag, username=usr or None, password=pwd or None, conf=conf_obj)
     airflow_dag_run_id = None
