@@ -441,6 +441,18 @@ class Database:
             con.execute(f"UPDATE upload_logs SET {', '.join(updates)} WHERE token = ?", params)
             existing = con.execute("SELECT 1 FROM upload_logs WHERE token = ?", [token]).fetchone()
             if not existing and (bucket or object_key or s3_uri):
+                # Try to resolve a username from related tables so we don't insert blanks
+                uname_row = con.execute(
+                    (
+                        "SELECT COALESCE(NULLIF(up.username,''), NULLIF(v.username,''), '') AS u "
+                        "FROM (SELECT ? AS token) t "
+                        "LEFT JOIN uploads up ON up.token = t.token "
+                        "LEFT JOIN validation_logs v ON v.token = t.token "
+                        "ORDER BY v.created_at DESC NULLS LAST LIMIT 1"
+                    ),
+                    [token],
+                ).fetchone()
+                resolved_user = (uname_row[0] if uname_row else "") or ""
                 con.execute(
                     """
                     INSERT INTO upload_logs (
@@ -451,7 +463,7 @@ class Database:
                         self._new_id(),
                         token,
                         run_id or "",
-                        "",
+                        resolved_user,
                         bucket or "",
                         object_key or "",
                         s3_uri or "",
@@ -497,8 +509,8 @@ class Database:
                             )
                         ELSE NULL
                     END AS event_time,
-                    COALESCE(u.username, v.username, up.username, '') AS username,
-                    COALESCE(up.filename, u.object_key, '') AS filename,
+                    COALESCE(NULLIF(u.username, ''), NULLIF(v.username, ''), NULLIF(up.username, ''), '') AS username,
+                    COALESCE(NULLIF(up.filename, ''), u.object_key, '') AS filename,
                     CASE
                         WHEN v.token IS NOT NULL THEN
                             CASE WHEN v.passed THEN 'Success' ELSE 'Failed' END
@@ -506,26 +518,23 @@ class Database:
                             CASE WHEN up.validated_passed THEN 'Success' ELSE 'Failed' END
                         ELSE 'Not run'
                     END AS validation_status,
-                    COALESCE(v.failed_columns, '') AS validation_comments,
+                    COALESCE(NULLIF(v.failed_columns, ''), '') AS validation_comments,
                     CASE
                         WHEN u.token IS NULL THEN 'Not uploaded'
                         WHEN COALESCE(u.status, '') <> '' THEN u.status
                         WHEN COALESCE(u.object_key, '') <> '' THEN 'Success'
                         ELSE 'Not uploaded'
                     END AS upload_status,
-                    COALESCE(u.object_key, '') AS upload_key,
-                    COALESCE(u.comments, '') AS upload_comments,
+                    COALESCE(NULLIF(u.object_key, ''), '') AS upload_key,
+                    COALESCE(NULLIF(u.comments, ''), '') AS upload_comments,
                     CASE
                         WHEN u.token IS NULL THEN 'Not triggered'
                         WHEN COALESCE(u.dag_status, '') <> '' THEN u.dag_status
                         ELSE 'Not triggered'
                     END AS airflow_status,
-                    CASE
-                        WHEN COALESCE(u.source_code, '') = '' THEN 'N/A'
-                        ELSE u.source_code
-                    END AS source_code,
-                    COALESCE(u.dag_run_id, '') AS dag_run_id,
-                    COALESCE(up.run_id, u.run_id, v.run_id, '') AS run_id,
+                    CASE WHEN NULLIF(u.source_code, '') IS NULL THEN 'N/A' ELSE u.source_code END AS source_code,
+                    COALESCE(NULLIF(u.dag_run_id, ''), '') AS dag_run_id,
+                    COALESCE(NULLIF(up.run_id, ''), NULLIF(u.run_id, ''), NULLIF(v.run_id, ''), '') AS run_id,
                     t.token AS token
                 FROM tokens t
                 LEFT JOIN latest_upload u ON u.token = t.token AND u.rn = 1

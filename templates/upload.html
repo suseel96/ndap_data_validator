@@ -4,20 +4,31 @@
   <div class="page-header d-flex align-items-center justify-content-between mb-3">
     <h4 class="m-0">Step 1: Upload CSV or Enter S3 Folder</h4>
   </div>
+  <style>
+    .disabled-block { position: relative; opacity: .6; }
+    .disabled-block .form-control { cursor: not-allowed; }
+    .disabled-badge { font-size: .75rem; vertical-align: middle; }
+  </style>
   <div class="card p-3 card-narrow">
     <form method="post" action="/preview" enctype="multipart/form-data" id="startForm">
       <input type="hidden" name="run_id" value="{{ run_id or '' }}" />
 
-      <div class="mb-3">
-        <label class="form-label">Upload CSV file</label>
-        <input type="file" name="file" accept=".csv" class="form-control" />
+      <div class="mb-3" id="fileBlock">
+        <label class="form-label">Upload CSV file <span id="fileDisabledBadge" class="badge bg-secondary disabled-badge d-none">Disabled (S3 selected)</span></label>
+        <input type="file" id="fileInput" name="file" accept=".csv" class="form-control" />
         <div class="form-text">If your file is larger than 300MB, please split it and use the S3 folder option below.</div>
       </div>
 
-      <div class="mb-3">
-        <label class="form-label">Or provide an S3 folder path</label>
-        <input type="text" name="s3_folder" class="form-control" placeholder="e.g. s3://my-bucket/path/to/folder/ or just path/to/folder/" />
-        <div class="form-text">We’ll sample 10 rows from one CSV for preview, then validate all CSV files in this folder.</div>
+      <div class="d-flex align-items-center my-2">
+        <div class="flex-grow-1"><hr class="m-0"></div>
+        <div class="px-2 small text-muted">OR</div>
+        <div class="flex-grow-1"><hr class="m-0"></div>
+      </div>
+
+      <div class="mb-3" id="s3Block">
+        <label class="form-label">Provide an S3 folder path <span id="s3DisabledBadge" class="badge bg-secondary disabled-badge d-none">Disabled (file selected)</span></label>
+        <input type="text" id="s3Input" name="s3_folder" class="form-control" placeholder="e.g. s3://my-bucket/path/to/folder/ or just path/to/folder/" />
+        <div class="form-text">We'll sample 10 rows from one CSV for preview, then validate all CSV files in this folder.</div>
       </div>
 
       <div class="mb-3">
@@ -42,23 +53,55 @@
   </div>
 
   <script>
-    // Client-side guard + dynamic loader message
-    document.getElementById('startForm').addEventListener('submit', function(e){
-      const file = this.querySelector('input[name="file"]').files[0];
-      const s3 = (this.querySelector('input[name="s3_folder"]').value || '').trim();
-      if (!file && !s3) {
-        e.preventDefault();
-        alert('Please upload a CSV or provide an S3 folder path.');
-        return;
-      }
-      // Show loader with appropriate message
-      if (typeof window.showLoader === 'function') {
-        if (s3) {
-          window.showLoader('Reading sample from S3 and preparing preview...');
+    // Client-side guard + dynamic loader + mutual exclusion
+    (function(){
+      const form = document.getElementById('startForm');
+      const fileInput = document.getElementById('fileInput');
+      const s3Input = document.getElementById('s3Input');
+      const fileBlock = document.getElementById('fileBlock');
+      const s3Block = document.getElementById('s3Block');
+      const fileBadge = document.getElementById('fileDisabledBadge');
+      const s3Badge = document.getElementById('s3DisabledBadge');
+
+      function syncInputs(){
+        const fileChosen = !!(fileInput && fileInput.files && fileInput.files.length > 0);
+        const s3Chosen = !!(((s3Input && s3Input.value) || '').trim());
+        if (fileChosen) {
+          if (s3Input) s3Input.setAttribute('disabled','disabled');
+          if (s3Block) s3Block.classList.add('disabled-block'); else {}
+          if (s3Badge) s3Badge.classList.remove('d-none');
         } else {
-          window.showLoader('Uploading file and preparing preview...');
+          if (s3Input) s3Input.removeAttribute('disabled');
+          if (s3Block) s3Block.classList.remove('disabled-block');
+          if (s3Badge) s3Badge.classList.add('d-none');
+        }
+        if (s3Chosen) {
+          if (fileInput) fileInput.setAttribute('disabled','disabled');
+          if (fileBlock) fileBlock.classList.add('disabled-block');
+          if (fileBadge) fileBadge.classList.remove('d-none');
+        } else {
+          if (fileInput) fileInput.removeAttribute('disabled');
+          if (fileBlock) fileBlock.classList.remove('disabled-block');
+          if (fileBadge) fileBadge.classList.add('d-none');
         }
       }
-    });
+      fileInput && fileInput.addEventListener('change', syncInputs);
+      s3Input && s3Input.addEventListener('input', syncInputs);
+      syncInputs();
+
+      form.addEventListener('submit', function(e){
+        const file = fileInput && fileInput.files[0];
+        const s3 = (s3Input && s3Input.value || '').trim();
+        if (!file && !s3) {
+          e.preventDefault();
+          alert('Please upload a CSV or provide an S3 folder path.');
+          return;
+        }
+        if (typeof window.showLoader === 'function') {
+          window.showLoader(s3 ? 'Reading sample from S3 and preparing preview...' : 'Uploading file and preparing preview...');
+        }
+      });
+    })();
   </script>
 {% endblock %}
+
