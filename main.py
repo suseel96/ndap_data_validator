@@ -220,7 +220,8 @@ def _airflow_api_get_json(base_url: str, path: str, username: str | None, passwo
 
 
 AIRFLOW_TERMINAL_STATES = {"success", "failed", "error", "upstream_failed"}
-TASK_LOG_SNIPPET_LIMIT = 4000
+# Allow large logs; UI will handle collapse/expand
+TASK_LOG_SNIPPET_LIMIT = 200000
 
 
 def trigger_airflow_dag(base_url: str, dag_id: str, username: str | None = None, password: str | None = None, conf: dict | None = None) -> tuple[bool, dict]:
@@ -1023,13 +1024,8 @@ async def upload(
                 },
             )
         data = _get_data_bytes(token)
+        # Keep original CSV intact for upload; do not coerce types here to avoid altering integers (e.g., 9 -> 9.0)
         df = _read_df_from_bytes(data)
-
-        cleaned_df, _ = coerce_dataframe_by_roles(
-            df,
-            role_selection,
-            measure_type_selection,
-        )
 
         if not s3_bucket:
             return _render_upload_with_error("S3 bucket is not configured. Please set it in Admin → Settings.")
@@ -1046,7 +1042,8 @@ async def upload(
                 region_name=s3_region,
             )
 
-        csv_bytes = cleaned_df.to_csv(index=False).encode("utf-8")
+        # Upload the original bytes exactly as provided by user
+        csv_bytes = data
 
         folder_value = (s3_folder_name or "").strip()
         state["s3_form"] = {
@@ -1610,18 +1607,34 @@ async def airflow_run_status(request: Request, dag_id: str, dag_run_id: str):
             task_id = task.get("task_id")
             log_snippet = ""
             if task_id:
+                # Try to use full_content=true to fetch complete log content for the latest try
+                try_number = task.get("try_number") or 1
+                log_path = f"/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}/logs/{try_number}?full_content=true"
                 log_success, log_info = _airflow_api_get_json(
                     base,
-                    f"/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}/logs/1",
+                    log_path,
                     username,
                     password,
-                    timeout=20,
+                    timeout=30,
                 )
-                if log_success and isinstance(log_info, dict):
-                    content = log_info.get("content") or ""
-                    log_snippet = content[-TASK_LOG_SNIPPET_LIMIT:]
-                elif log_success and isinstance(log_info, str):
-                    log_snippet = log_info[-TASK_LOG_SNIPPET_LIMIT:]
+                if log_success:
+                    if isinstance(log_info, dict):
+                        content = log_info.get("content") or ""
+                        log_snippet = content[-TASK_LOG_SNIPPET_LIMIT:]
+                    elif isinstance(log_info, list):
+                        # Some Airflow versions return list of segments with 'content'
+                        parts = []
+                        for seg in log_info:
+                            if isinstance(seg, dict) and seg.get("content"):
+                                parts.append(str(seg.get("content")))
+                            elif isinstance(seg, str):
+                                parts.append(seg)
+                        content = "\n".join(parts)
+                        log_snippet = content[-TASK_LOG_SNIPPET_LIMIT:]
+                    elif isinstance(log_info, str):
+                        log_snippet = log_info[-TASK_LOG_SNIPPET_LIMIT:]
+                    else:
+                        log_snippet = "(log format unrecognized)"
                 else:
                     log_snippet = f"(log unavailable: {log_info})" if log_info else "(log unavailable)"
                 if log_snippet and source_code is None:
