@@ -47,7 +47,14 @@
     </div>
   </div>
 
-  <form method="post" action="/airflow-trigger" class="mt-3" id="airflowForm">
+  <form method="post" action="/airflow-trigger" class="mt-3" id="airflowForm"
+        data-load-mode="{{ load_mode or 'new' }}"
+        data-s3-folder-mode="{{ 'true' if s3_folder_mode else 'false' }}"
+        data-s3-bucket="{{ s3_bucket or '' }}"
+        data-s3-folder="{{ s3_folder or '' }}"
+        data-s3-uri="{{ s3_uri or '' }}"
+        data-s3-object-key="{{ s3_object_key or '' }}"
+        data-source-code="{{ s3_folder or '' }}">
     <input type="hidden" name="token" value="{{ token }}" />
     <input type="hidden" name="run_id" value="{{ run_id or '' }}" />
     {% if airflow_ready and not airflow_triggered %}<fieldset>{% else %}<fieldset disabled>{% endif %}
@@ -83,13 +90,108 @@
         </label>
       </div>
     </fieldset>
-    <button class="btn btn-primary mt-3" type="submit" {% if not airflow_ready or airflow_triggered %}disabled{% endif %}>Trigger DAG</button>
+    <button class="btn btn-primary mt-3" type="button" id="openConfirmBtn" {% if not airflow_ready or airflow_triggered %}disabled{% endif %}>Trigger DAG</button>
   </form>
+  
+  <!-- Confirm Modal -->
+  <div class="modal fade" id="confirmModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Confirm Airflow Trigger</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="mb-2">Please review your selections:</p>
+          <ul class="mb-0">
+            <li><strong>Load type:</strong> <span data-role="cfm-mode">-</span></li>
+            <li><strong>Source code:</strong> <span data-role="cfm-source">-</span></li>
+            <li><strong>S3 target:</strong> <span data-role="cfm-s3">-</span></li>
+            <li class="mt-2"><strong>Flags:</strong>
+              <div class="small text-muted ms-2">
+                is_incremental: <span data-role="cfm-inc">-</span>,
+                schema_exist: <span data-role="cfm-sch">-</span>,
+                delta_with_structure_change: <span data-role="cfm-delta">-</span>
+              </div>
+            </li>
+          </ul>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" id="confirmTriggerBtn">Confirm & Trigger</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <script>
-    document.getElementById('airflowForm')?.addEventListener('submit', function(){
-      if (typeof window.showLoader === 'function') {
-        window.showLoader('Triggering Airflow DAG...');
+    (function(){
+      const form = document.getElementById('airflowForm');
+      const modalEl = document.getElementById('confirmModal');
+      const confirmBtn = document.getElementById('confirmTriggerBtn');
+      const openBtn = document.getElementById('openConfirmBtn');
+      let modal;
+      let pending = false;
+      function yesNo(v){ return v ? 'yes' : 'no'; }
+      function modeLabel(val){
+        switch((val||'').toLowerCase()){
+          case 'full_reload': return 'Existing dataset - Full Reload';
+          case 'delta': return 'Existing dataset - Delta Loading';
+          case 'structure_change': return 'Existing dataset - Structure change';
+          default: return 'New dataset';
+        }
       }
-    });
+      function populateSummary(){
+        const selected = form.querySelector('input[name="load_mode"]:checked');
+        const mode = selected ? selected.value : (form.dataset.loadMode || 'new');
+        const s3FolderMode = (form.dataset.s3FolderMode === 'true');
+        const s3Bucket = form.dataset.s3Bucket || '';
+        const s3Folder = form.dataset.s3Folder || '';
+        const s3Uri = form.dataset.s3Uri || '';
+        const s3ObjectKey = form.dataset.s3ObjectKey || '';
+        const s3Text = s3FolderMode ? (s3Bucket ? (`s3://${s3Bucket}/${s3Folder}`) : s3Uri) : (s3Bucket ? (`s3://${s3Bucket}/${s3ObjectKey}`) : s3Uri);
+        const src = form.dataset.sourceCode || s3Folder || '';
+        // derive flags from mode
+        let inc=false, sch=false, dsc=false;
+        if (mode==='full_reload'){ inc=false; sch=true; dsc=false; }
+        else if (mode==='delta'){ inc=true; sch=true; dsc=false; }
+        else if (mode==='structure_change'){ inc=false; sch=false; dsc=true; }
+        else { inc=false; sch=false; dsc=false; }
+        modalEl.querySelector('[data-role="cfm-mode"]').textContent = modeLabel(mode);
+        modalEl.querySelector('[data-role="cfm-source"]').textContent = src || '-';
+        modalEl.querySelector('[data-role="cfm-s3"]').textContent = s3Text || '-';
+        modalEl.querySelector('[data-role="cfm-inc"]').textContent = yesNo(inc);
+        modalEl.querySelector('[data-role="cfm-sch"]').textContent = yesNo(sch);
+        modalEl.querySelector('[data-role="cfm-delta"]').textContent = yesNo(dsc);
+      }
+      if (form && modalEl && window.bootstrap && window.bootstrap.Modal){ modal = new window.bootstrap.Modal(modalEl); }
+      if (openBtn){
+        openBtn.addEventListener('click', function(){
+          if (pending) return;
+          if (!modal && window.bootstrap && window.bootstrap.Modal){
+            modal = new window.bootstrap.Modal(modalEl);
+          }
+          populateSummary();
+          if (modal){ modal.show(); }
+          else {
+            const ok = window.confirm('Trigger Airflow DAG with the selected options?');
+            if (ok){
+              pending = true;
+              if (typeof window.showLoader === 'function') { window.showLoader('Triggering Airflow DAG...'); }
+              form.submit();
+            }
+          }
+        });
+      }
+      if (confirmBtn){
+        confirmBtn.addEventListener('click', function(){
+          pending = true;
+          modal && modal.hide();
+          if (typeof window.showLoader === 'function') {
+            window.showLoader('Triggering Airflow DAG...');
+          }
+          form.submit();
+        });
+      }
+    })();
   </script>
 {% endblock %}
