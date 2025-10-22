@@ -270,47 +270,153 @@ async def index(request: Request, reset: str | None = None):
         "completed_steps": completed_steps,
         "token": active_token,
         "run_id": run_id,
+        "s3_folder_mode": False,
     })
 
 
 @app.post("/preview", response_class=HTMLResponse)
 async def preview(
     request: Request,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
     schema: str = Form("National"),
     run_id: str | None = Form(None),
+    s3_folder: str | None = Form(None),
 ):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
     try:
-        content = await file.read()
         run_id = (run_id or "").strip() or _generate_run_id()
         request.session["current_run_id"] = run_id
         token = uuid4().hex
-        DATA_STORE[token] = content
-        # Persist to database as well to survive reloads
-        # (we call DB.save_upload below after computing record_count)
 
-        df = _read_df_from_bytes(content, nrows=10)
-        columns: List[str] = list(df.columns)
-        preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped", na_rep="")
-        file_name = file.filename or ""
-        try:
-            record_count = int(_read_df_from_bytes(content).shape[0])
-        except Exception:
-            record_count = 0
-        try:
-            DB.save_upload(token, get_username(request), file_name, content, record_count, run_id=run_id)
-        except Exception:
-            pass
+        # Determine if S3 folder mode or file upload mode
+        s3_input = (s3_folder or "").strip()
+        # If both given, prefer S3 folder. If none, show error.
+        if not s3_input and (not file or not (file.filename or "").strip()):
+            _clear_active_run(request)
+            run_id = _reset_run_id(request)
+            return templates.TemplateResponse(
+                "upload.html",
+                {
+                    "request": request,
+                    "error": "Please upload a CSV or provide an S3 folder path.",
+                    "run_id": run_id,
+                    "active_step": 1,
+                    "title": "Upload",
+                    "completed_steps": _get_session_steps(request),
+                    "token": _get_active_token(request),
+                },
+            )
 
-        # Persist selected schema and mark step 1 as completed
-        VALIDATION_STATE[token] = {
-            "schema": schema,
-            "file_name": file_name,
-            "record_count": record_count,
-            "run_id": run_id,
-        }
+        s3_mode_flag = False
+        if s3_input:
+            # Build S3 client
+            s3_bucket_cfg = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
+            s3_access_key_id = (DB.get_setting("S3_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID") or "").strip()
+            s3_secret_key = (DB.get_setting("S3_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or "").strip()
+            s3_region = (os.environ.get("AWS_REGION") or "us-east-1").strip()
+            if s3_access_key_id and s3_secret_key:
+                uploader = S3Uploader(
+                    mode=S3CredentialsMode.Manual,
+                    access_key_id=s3_access_key_id,
+                    secret_access_key=s3_secret_key,
+                    region_name=s3_region,
+                )
+            else:
+                uploader = S3Uploader(mode=S3CredentialsMode.Environment, region_name=s3_region)
+
+            # Parse input: allow full s3://bucket/prefix or just prefix
+            in_bucket = s3_bucket_cfg
+            in_prefix = s3_input
+            if s3_input.lower().startswith("s3://"):
+                # s3://bucket/prefix[/]
+                rest = s3_input[len("s3://"):]
+                parts = rest.split("/", 1)
+                in_bucket = parts[0]
+                in_prefix = parts[1] if len(parts) > 1 else ""
+            in_prefix = (in_prefix or "").lstrip("/")
+            if in_prefix and not in_prefix.endswith("/"):
+                in_prefix = in_prefix + "/"
+
+            if not in_bucket:
+                raise ValueError("S3 bucket is not configured. Please set S3_BUCKET in Settings.")
+
+            all_keys = uploader.list_objects(in_bucket, in_prefix)
+            # pick first CSV-like key
+            csv_keys = [k for k in all_keys if k.lower().endswith(".csv")]
+            if not csv_keys:
+                raise ValueError("No CSV files found in the provided S3 folder.")
+            sample_key = csv_keys[0]
+            content = uploader.get_object_bytes(in_bucket, sample_key)
+
+            DATA_STORE[token] = content
+            df = _read_df_from_bytes(content, nrows=10)
+            columns: List[str] = list(df.columns)
+            preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped", na_rep="")
+            try:
+                record_count = int(_read_df_from_bytes(content).shape[0])
+            except Exception:
+                record_count = 0
+            file_name = sample_key
+
+            # Persist selected schema and S3 folder info
+            VALIDATION_STATE[token] = {
+                "schema": schema,
+                "file_name": file_name,
+                "record_count": record_count,
+                "run_id": run_id,
+                "s3_folder_info": {
+                    "bucket": in_bucket,
+                    "prefix": in_prefix,
+                    "files": csv_keys,
+                    "sample_key": sample_key,
+                },
+            }
+            try:
+                DB.save_upload(token, get_username(request), file_name, content, record_count, run_id=run_id)
+            except Exception:
+                pass
+            s3_mode_flag = True
+        else:
+            # Backward-compatible file upload path
+            content = await file.read()
+            # Enforce 300MB max for direct upload
+            if len(content) > 300 * 1024 * 1024:
+                _clear_active_run(request)
+                run_id = _reset_run_id(request)
+                return templates.TemplateResponse(
+                    "upload.html",
+                    {
+                        "request": request,
+                        "error": f"File is larger than 300MB ({len(content) // (1024*1024)} MB). Please split the file and use the S3 folder option.",
+                        "run_id": run_id,
+                        "active_step": 1,
+                        "title": "Upload",
+                        "completed_steps": _get_session_steps(request),
+                        "token": _get_active_token(request),
+                    },
+                )
+            DATA_STORE[token] = content
+            df = _read_df_from_bytes(content, nrows=10)
+            columns: List[str] = list(df.columns)
+            preview_html = df.head(10).to_html(index=False, classes="table table-sm table-striped", na_rep="")
+            file_name = file.filename or ""
+            try:
+                record_count = int(_read_df_from_bytes(content).shape[0])
+            except Exception:
+                record_count = 0
+            try:
+                DB.save_upload(token, get_username(request), file_name, content, record_count, run_id=run_id)
+            except Exception:
+                pass
+            VALIDATION_STATE[token] = {
+                "schema": schema,
+                "file_name": file_name,
+                "record_count": record_count,
+                "run_id": run_id,
+            }
+
+        # Mark step 1 completed
         STEP_COMPLETION[token] = {1}
         _set_active_token(request, token)
         _set_session_steps(request, {1})
@@ -330,6 +436,7 @@ async def preview(
                 "title": "Select types",
                 "completed_steps": _combined_steps(request, token),
                 "run_id": run_id,
+                "s3_folder_mode": s3_mode_flag,
             },
         )
     except Exception as ex:
@@ -387,6 +494,7 @@ async def preview_get(request: Request, token: str | None = None):
             "title": "Select types",
             "completed_steps": _combined_steps(request, token),
             "run_id": meta.get("run_id", ""),
+            "s3_folder_mode": bool(VALIDATION_STATE.get(token, {}).get("s3_folder_info")),
         },
     )
 
@@ -412,123 +520,264 @@ async def validate(request: Request):
     time_date_only = False
 
     try:
-        if not _get_data_bytes(token):
-            _clear_active_run(request)
-            run_id = _reset_run_id(request)
-            return templates.TemplateResponse(
-                "upload.html",
-                {
-                    "request": request,
-                    "error": "Session expired or file not found. Please re-upload your CSV.",
-                    "run_id": run_id,
-                    "active_step": 1,
-                    "title": "Upload",
-                    "completed_steps": _get_session_steps(request),
-                    "token": None,
-                },
-            )
-        data = _get_data_bytes(token)
-        df = _read_df_from_bytes(data)
-
-        cleaned_df, coercion_report = coerce_dataframe_by_roles(
-            df,
-            role_selection,
-            measure_type_selection,
-            time_date_only=time_date_only,
-        )
-        validation_report = validate_dataframe_by_roles(
-            cleaned_df,
-            role_selection,
-            coercion_report,
-            schema_name=VALIDATION_STATE.get(token, {}).get("schema", "National"),
-        )
-
+        state0 = VALIDATION_STATE.get(token, {})
+        s3_info = state0.get("s3_folder_info") if isinstance(state0, dict) else None
         per_column_rows: List[Dict[str, object]] = []
-        for col in df.columns:
-            col_report = validation_report["per_column"].get(col, {})
-            per_column_rows.append(
-                {
-                    "column": col,
-                    "role": col_report.get("role"),
-                    "nulls": int(col_report.get("nulls", 0)),
-                    "conversion_errors": int(coercion_report.get(col, {}).get("conversion_errors", 0)),
-                    "passed": bool(col_report.get("passed", False)),
-                    "reasons": ", ".join(col_report.get("reasons", [])),
-                }
-            )
+        file_results: List[Dict[str, object]] = []
+        passed_all = True
 
-        passed = bool(validation_report.get("passed", False))
-        failed_columns = validation_report.get("failed_columns", [])
+        if s3_info:
+            # Validate all CSV files in the S3 folder with the selected roles
+            s3_bucket = s3_info.get("bucket", "")
+            s3_prefix = s3_info.get("prefix", "")
+            csv_files: List[str] = list(s3_info.get("files", []) or [])
+            s3_access_key_id = (DB.get_setting("S3_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID") or "").strip()
+            s3_secret_key = (DB.get_setting("S3_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or "").strip()
+            s3_region = (os.environ.get("AWS_REGION") or "us-east-1").strip()
+            if s3_access_key_id and s3_secret_key:
+                uploader = S3Uploader(
+                    mode=S3CredentialsMode.Manual,
+                    access_key_id=s3_access_key_id,
+                    secret_access_key=s3_secret_key,
+                    region_name=s3_region,
+                )
+            else:
+                uploader = S3Uploader(mode=S3CredentialsMode.Environment, region_name=s3_region)
 
-        # persist validation state for navigation
-        meta = _get_meta(token)
-        prior_state = VALIDATION_STATE.get(token, {})
-        schema_name = prior_state.get("schema", "National")
-        run_id = run_id_raw or prior_state.get("run_id") or meta.get("run_id", "")
-        VALIDATION_STATE[token] = {
-            "columns": columns,
-            "role_selection": role_selection,
-            "measure_type_selection": measure_type_selection,
-            "schema": schema_name,
-            "rows": per_column_rows,
-            "passed": passed,
-            "failed_columns": failed_columns,
-            "file_name": meta.get("file_name", ""),
-            "record_count": meta.get("record_count", 0),
-            "run_id": run_id,
-        }
-        # Mark step 2 as completed
-        if token not in STEP_COMPLETION:
-            STEP_COMPLETION[token] = set()
-        STEP_COMPLETION[token].add(2)
-        # If validation passed, mark step 3 as completed so stepper turns green and step 4 unlocks
-        if passed:
-            STEP_COMPLETION[token].add(3)
+            for key in csv_files:
+                try:
+                    data = uploader.get_object_bytes(s3_bucket, key)
+                    df = _read_df_from_bytes(data)
+                    cleaned_df, coercion_report = coerce_dataframe_by_roles(
+                        df,
+                        role_selection,
+                        measure_type_selection,
+                        time_date_only=time_date_only,
+                    )
+                    validation_report = validate_dataframe_by_roles(
+                        cleaned_df,
+                        role_selection,
+                        coercion_report,
+                        schema_name=state0.get("schema", "National"),
+                    )
+                    passed = bool(validation_report.get("passed", False))
+                    failed_columns = validation_report.get("failed_columns", [])
+                    # Build per-column details similar to single-file view
+                    per_col_details: List[Dict[str, object]] = []
+                    for col in df.columns:
+                        col_report = validation_report["per_column"].get(col, {})
+                        per_col_details.append(
+                            {
+                                "column": col,
+                                "role": col_report.get("role"),
+                                "nulls": int(col_report.get("nulls", 0)),
+                                "conversion_errors": int(coercion_report.get(col, {}).get("conversion_errors", 0)),
+                                "passed": bool(col_report.get("passed", False)),
+                                "reasons": ", ".join(col_report.get("reasons", [])),
+                            }
+                        )
 
-        _set_active_token(request, token)
-        _add_session_step(request, 2)
-        if passed:
-            _add_session_step(request, 3)
+                    file_results.append({
+                        "file": key,
+                        "passed": passed,
+                        "failed_columns": failed_columns,
+                        "failed_count": len(failed_columns or []),
+                        "rows": df.shape[0],
+                        "details": per_col_details,
+                    })
+                    # Log per-file result
+                    try:
+                        DB.log_validation(token, get_username(request), passed, ",".join(failed_columns), run_id=state0.get("run_id"))
+                    except Exception:
+                        pass
+                    if not passed:
+                        passed_all = False
+                except Exception as ex_file:
+                    file_results.append({
+                        "file": key,
+                        "passed": False,
+                        "failed_columns": [f"error: {ex_file}"],
+                        "failed_count": 1,
+                        "rows": 0,
+                    })
+                    passed_all = False
 
-        resp = templates.TemplateResponse(
-            "validate.html",
-            {
-                "request": request,
-                "token": token,
+            # set meta to show prefix context
+            meta = _get_meta(token)
+            prior_state = VALIDATION_STATE.get(token, {})
+            schema_name = prior_state.get("schema", "National")
+            run_id = run_id_raw or prior_state.get("run_id") or meta.get("run_id", "")
+            VALIDATION_STATE[token] = {
                 "columns": columns,
-                "role_options": ROLE_OPTIONS,
-                "measure_types": MEASURE_TYPES,
                 "role_selection": role_selection,
                 "measure_type_selection": measure_type_selection,
-                "schema": VALIDATION_STATE.get(token, {}).get("schema", "National"),
+                "schema": schema_name,
+                "rows": per_column_rows,
+                "file_results": file_results,
+                "passed": passed_all,
+                "failed_columns": [],
+                "file_name": f"{s3_bucket}/{s3_prefix}",
+                "record_count": meta.get("record_count", 0),
+                "run_id": run_id,
+                "s3_folder_info": s3_info,
+            }
+
+            # steps: complete 2, and if all pass, 3 and 4 (skip upload)
+            if token not in STEP_COMPLETION:
+                STEP_COMPLETION[token] = set()
+            STEP_COMPLETION[token].add(2)
+            if passed_all:
+                STEP_COMPLETION[token].add(3)
+                STEP_COMPLETION[token].add(4)
+            _set_active_token(request, token)
+            _add_session_step(request, 2)
+            if passed_all:
+                _add_session_step(request, 3)
+                _add_session_step(request, 4)
+
+            return templates.TemplateResponse(
+                "validate.html",
+                {
+                    "request": request,
+                    "token": token,
+                    "columns": columns,
+                    "role_options": ROLE_OPTIONS,
+                    "measure_types": MEASURE_TYPES,
+                    "role_selection": role_selection,
+                    "measure_type_selection": measure_type_selection,
+                    "schema": schema_name,
+                    "rows": per_column_rows,
+                    "file_results": file_results,
+                    "passed": passed_all,
+                    "failed_columns": [],
+                    "file_name": f"{s3_bucket}/{s3_prefix}",
+                    "record_count": meta.get("record_count", 0),
+                    "active_step": 3,
+                    "title": "Validate",
+                    "completed_steps": _combined_steps(request, token),
+                    "run_id": run_id,
+                    "s3_folder_mode": True,
+                },
+            )
+        else:
+            # Original single-file validation path
+            if not _get_data_bytes(token):
+                _clear_active_run(request)
+                run_id = _reset_run_id(request)
+                return templates.TemplateResponse(
+                    "upload.html",
+                    {
+                        "request": request,
+                        "error": "Session expired or file not found. Please re-upload your CSV.",
+                        "run_id": run_id,
+                        "active_step": 1,
+                        "title": "Upload",
+                        "completed_steps": _get_session_steps(request),
+                        "token": None,
+                    },
+                )
+            data = _get_data_bytes(token)
+            df = _read_df_from_bytes(data)
+
+            cleaned_df, coercion_report = coerce_dataframe_by_roles(
+                df,
+                role_selection,
+                measure_type_selection,
+                time_date_only=time_date_only,
+            )
+            validation_report = validate_dataframe_by_roles(
+                cleaned_df,
+                role_selection,
+                coercion_report,
+                schema_name=VALIDATION_STATE.get(token, {}).get("schema", "National"),
+            )
+
+            for col in df.columns:
+                col_report = validation_report["per_column"].get(col, {})
+                per_column_rows.append(
+                    {
+                        "column": col,
+                        "role": col_report.get("role"),
+                        "nulls": int(col_report.get("nulls", 0)),
+                        "conversion_errors": int(coercion_report.get(col, {}).get("conversion_errors", 0)),
+                        "passed": bool(col_report.get("passed", False)),
+                        "reasons": ", ".join(col_report.get("reasons", [])),
+                    }
+                )
+
+            passed = bool(validation_report.get("passed", False))
+            failed_columns = validation_report.get("failed_columns", [])
+
+            # persist validation state for navigation
+            meta = _get_meta(token)
+            prior_state = VALIDATION_STATE.get(token, {})
+            schema_name = prior_state.get("schema", "National")
+            run_id = run_id_raw or prior_state.get("run_id") or meta.get("run_id", "")
+            VALIDATION_STATE[token] = {
+                "columns": columns,
+                "role_selection": role_selection,
+                "measure_type_selection": measure_type_selection,
+                "schema": schema_name,
                 "rows": per_column_rows,
                 "passed": passed,
                 "failed_columns": failed_columns,
                 "file_name": meta.get("file_name", ""),
                 "record_count": meta.get("record_count", 0),
-                "active_step": 3,
-                "title": "Validate",
-                "completed_steps": _combined_steps(request, token),
                 "run_id": run_id,
-            },
-        )
-        # Persist validation snapshot to DB for resilience across reloads
-        try:
-            DB.save_validation_snapshot(
-                token,
-                json.dumps(columns),
-                json.dumps(role_selection),
-                False,
-                passed,
-                run_id=run_id,
+            }
+            # Mark step 2 as completed
+            if token not in STEP_COMPLETION:
+                STEP_COMPLETION[token] = set()
+            STEP_COMPLETION[token].add(2)
+            # If validation passed, mark step 3 as completed so stepper turns green and step 4 unlocks
+            if passed:
+                STEP_COMPLETION[token].add(3)
+
+            _set_active_token(request, token)
+            _add_session_step(request, 2)
+            if passed:
+                _add_session_step(request, 3)
+
+            resp = templates.TemplateResponse(
+                "validate.html",
+                {
+                    "request": request,
+                    "token": token,
+                    "columns": columns,
+                    "role_options": ROLE_OPTIONS,
+                    "measure_types": MEASURE_TYPES,
+                    "role_selection": role_selection,
+                    "measure_type_selection": measure_type_selection,
+                    "schema": VALIDATION_STATE.get(token, {}).get("schema", "National"),
+                    "rows": per_column_rows,
+                    "passed": passed,
+                    "failed_columns": failed_columns,
+                    "file_name": meta.get("file_name", ""),
+                    "record_count": meta.get("record_count", 0),
+                    "active_step": 3,
+                    "title": "Validate",
+                    "completed_steps": _combined_steps(request, token),
+                    "run_id": run_id,
+                    "s3_folder_mode": False,
+                },
             )
-        except Exception:
-            pass
-        try:
-            DB.log_validation(token, get_username(request), passed, ",".join(failed_columns), run_id=run_id)
-        except Exception:
-            pass
-        return resp
+            # Persist validation snapshot to DB for resilience across reloads
+            try:
+                DB.save_validation_snapshot(
+                    token,
+                    json.dumps(columns),
+                    json.dumps(role_selection),
+                    False,
+                    passed,
+                    run_id=run_id,
+                )
+            except Exception:
+                pass
+            try:
+                DB.log_validation(token, get_username(request), passed, ",".join(failed_columns), run_id=run_id)
+            except Exception:
+                pass
+            return resp
     except Exception as ex:
         trace = traceback.format_exc()
         _clear_active_run(request)
@@ -584,6 +833,7 @@ async def validate_get(request: Request, token: str | None = None):
             "measure_type_selection": state.get("measure_type_selection", {}),
             "schema": state.get("schema", "National"),
             "rows": state.get("rows", []),
+            "file_results": state.get("file_results", []),
             "passed": state.get("passed", False),
             "failed_columns": state.get("failed_columns", []),
             "file_name": meta.get("file_name", ""),
@@ -592,6 +842,7 @@ async def validate_get(request: Request, token: str | None = None):
             "title": "Validate",
             "completed_steps": _combined_steps(request, token),
             "run_id": state.get("run_id") or meta.get("run_id", ""),
+            "s3_folder_mode": bool(state.get("s3_folder_info")),
         },
     )
 
@@ -861,7 +1112,7 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
             return RedirectResponse(url=f"/airflow-trigger?token={token}", status_code=302)
         return RedirectResponse(url="/", status_code=302)
     state = VALIDATION_STATE.get(token)
-    if not state or "s3_upload" not in state:
+    if not state or ("s3_upload" not in state and "s3_folder_info" not in state):
         return RedirectResponse(url=f"/upload?token={token}", status_code=302)
     if token not in STEP_COMPLETION:
         STEP_COMPLETION[token] = set()
@@ -871,11 +1122,21 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
     _add_session_step(request, 3)
     _add_session_step(request, 4)
 
-    s3_info = state["s3_upload"]
-    s3_bucket = s3_info.get("bucket", "")
-    s3_object_key = s3_info.get("object_key", "")
-    s3_uri = s3_info.get("s3_uri", "")
-    s3_folder = s3_info.get("folder", "")
+    s3_upload_info = state.get("s3_upload")
+    s3_folder_info = state.get("s3_folder_info")
+    if s3_upload_info:
+        s3_bucket = s3_upload_info.get("bucket", "")
+        s3_object_key = s3_upload_info.get("object_key", "")
+        s3_uri = s3_upload_info.get("s3_uri", "")
+        s3_folder = s3_upload_info.get("folder", "")
+        s3_folder_mode = False
+    else:
+        s3_bucket = (s3_folder_info or {}).get("bucket", "")
+        s3_object_key = ""
+        s3_prefix = (s3_folder_info or {}).get("prefix", "")
+        s3_uri = f"s3://{s3_bucket}/{s3_prefix}"
+        s3_folder = s3_prefix
+        s3_folder_mode = True
 
     airflow_base, username, password = _get_airflow_config()
     airflow_dag_id_val = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
@@ -903,6 +1164,7 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
         "airflow_ready": settings_ready,
         "missing_settings": missing_settings,
         "uploaded_recently": uploaded == "1",
+        "s3_folder_mode": s3_folder_mode,
         "file_name": meta.get("file_name", ""),
         "record_count": meta.get("record_count", 0),
         "active_step": 5,
@@ -926,18 +1188,31 @@ async def airflow_trigger_post(
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
     state = VALIDATION_STATE.get(token)
-    if not state or "s3_upload" not in state:
+    if not state or ("s3_upload" not in state and "s3_folder_info" not in state):
         return RedirectResponse(url=f"/upload?token={token}", status_code=302)
     if token not in STEP_COMPLETION:
         STEP_COMPLETION[token] = set()
     _set_active_token(request, token)
     _add_session_step(request, 4)
-    s3_info = state["s3_upload"]
-    s3_bucket = s3_info.get("bucket")
-    s3_object_key = s3_info.get("object_key")
-    s3_uri = s3_info.get("s3_uri")
-    folder_value = s3_info.get("folder", "")
-    if not s3_bucket or not s3_object_key or not s3_uri:
+    s3_upload_info = state.get("s3_upload")
+    s3_folder_info = state.get("s3_folder_info")
+    s3_bucket = None
+    s3_object_key = None
+    s3_uri = None
+    folder_value = ""
+    s3_folder_mode = False
+    if s3_upload_info:
+        s3_bucket = s3_upload_info.get("bucket")
+        s3_object_key = s3_upload_info.get("object_key")
+        s3_uri = s3_upload_info.get("s3_uri")
+        folder_value = s3_upload_info.get("folder", "")
+    elif s3_folder_info:
+        s3_bucket = s3_folder_info.get("bucket")
+        s3_object_key = ""
+        folder_value = s3_folder_info.get("prefix", "")
+        s3_uri = f"s3://{s3_bucket}/{folder_value}"
+        s3_folder_mode = True
+    if not s3_bucket or not s3_uri:
         return RedirectResponse(url=f"/upload?token={token}", status_code=302)
 
     existing_run = state.get("airflow_run")
@@ -947,7 +1222,7 @@ async def airflow_trigger_post(
         return RedirectResponse(url=f"/airflow-trigger?token={token}", status_code=303)
 
     inc_bool = is_incremental == "on"
-    schema_bool = schema_exists == "on"
+    schema_bool = True if inc_bool else (schema_exists == "on")
     state["airflow_params"] = {"is_incremental": inc_bool, "schema_exists": schema_bool}
 
     airflow_base, username, password = _get_airflow_config()
@@ -989,6 +1264,7 @@ async def airflow_trigger_post(
             "error": message,
             "trace": trace,
             "run_id": resolved_run_id or refreshed_meta.get("run_id", ""),
+            "s3_folder_mode": s3_folder_mode,
         }
         return templates.TemplateResponse("airflow_trigger.html", context)
 
@@ -999,13 +1275,25 @@ async def airflow_trigger_post(
     usr = username
     pwd = password
 
-    conf_obj = {
-        "source_code": folder_value,
-        "arg1": "yes" if inc_bool else "no",
-        "arg2": "yes" if schema_bool else "no",
-        "s3_uri": s3_uri,
-        "token": token,
-    }
+    # Build conf
+    if s3_folder_mode:
+        # Ensure backward compatibility: many DAGs expect `source_code`.
+        # Provide both `source_code` (prefix) and `s3_folder` (full URI).
+        conf_obj = {
+            "source_code": folder_value,    # prefix (e.g., path/to/folder/)
+            "s3_folder": s3_uri,            # full URI (e.g., s3://bucket/path/to/folder/)
+            "arg1": "yes" if inc_bool else "no",
+            "arg2": "yes" if schema_bool else "no",
+            "token": token,
+        }
+    else:
+        conf_obj = {
+            "source_code": folder_value,
+            "arg1": "yes" if inc_bool else "no",
+            "arg2": "yes" if schema_bool else "no",
+            "s3_uri": s3_uri,
+            "token": token,
+        }
     ok, info = trigger_airflow_dag(airflow_base, dag, username=usr or None, password=pwd or None, conf=conf_obj)
     airflow_dag_run_id = None
     airflow_run_url = None
@@ -1034,7 +1322,7 @@ async def airflow_trigger_post(
                 dag_run_id=airflow_dag_run_id,
                 comments="",
                 bucket=s3_bucket,
-                object_key=s3_object_key,
+                object_key=s3_object_key or None,
                 s3_uri=s3_uri,
                 status="Success",
                 run_id=resolved_run_id,

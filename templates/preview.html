@@ -245,6 +245,10 @@
         input.value = 'Others';
         this.appendChild(input);
       });
+      // Show loader for validation
+      if (typeof window.showLoader === 'function') {
+        window.showLoader('Running validations...');
+      }
     });
 
     // Close button to move back to All columns
