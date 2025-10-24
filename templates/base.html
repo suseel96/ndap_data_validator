@@ -67,7 +67,7 @@
           
           <li class="step {% if active_step == 1 %}active{% endif %} {% if 1 in completed %}completed{% endif %}">
             {% if active_step > 1 and not lock_backwards %}
-              <a href="/" class="step-link">
+              <a href="/upload{{ qs }}" class="step-link">
                 <div class="step-icon">1</div>
                 <div class="step-title">Upload CSV and preview</div>
               </a>

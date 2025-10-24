@@ -292,50 +292,8 @@ def trigger_airflow_dag(base_url: str, dag_id: str, username: str | None = None,
 async def index(request: Request, reset: str | None = None):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
-    run_id = request.session.get("current_run_id")
-    active_token = request.session.get("active_token")
-    if reset and reset.lower() in {"1", "true", "yes"}:
-        _clear_active_run(request)
-        run_id = _reset_run_id(request)
-    elif not run_id:
-        run_id = _reset_run_id(request)
-    completed_steps = _get_session_steps(request)
-    # If we already have a token (load type chosen), begin the stepper at Upload step
-    if active_token and VALIDATION_STATE.get(active_token):
-        # derive load mode for banner
-        st = VALIDATION_STATE.get(active_token) or {}
-        params = st.get("airflow_params", {}) if isinstance(st, dict) else {}
-        inc = bool(params.get("is_incremental"))
-        sch = bool(params.get("schema_exists"))
-        dsc = bool(params.get("delta_with_structure_change"))
-        if dsc:
-            load_mode = "structure_change"
-        elif inc and sch:
-            load_mode = "delta"
-        elif (not inc) and sch:
-            load_mode = "full_reload"
-        else:
-            load_mode = "new"
-        return templates.TemplateResponse("upload.html", {
-            "request": request,
-            "active_step": 1,
-            "title": "Upload",
-            "completed_steps": completed_steps,
-            "token": active_token,
-            "run_id": run_id,
-            "s3_folder_mode": False,
-            "load_mode": load_mode,
-        })
-    # Otherwise render load type selection outside of stepper
-    return templates.TemplateResponse("load_type.html", {
-        "request": request,
-        "active_step": 0,
-        "title": "Select Load Type",
-        "completed_steps": [],
-        "token": None,
-        "run_id": run_id,
-        "show_stepper": False,
-    })
+    # Always start new flow from Load Type when hitting root
+    return RedirectResponse(url="/load-type?reset=1", status_code=302)
 
 
 @app.get("/load-type", response_class=HTMLResponse)
@@ -362,6 +320,34 @@ async def load_type_get(request: Request, reset: str | None = None):
             load_mode = "full_reload"
         else:
             load_mode = "new"
+    # Early settings precheck (surface warnings on first step)
+    s3_bucket_cfg = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
+    s3_access_key = (DB.get_setting("S3_ACCESS_KEY_ID") or os.environ.get("S3_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID") or "").strip()
+    s3_secret_key = (DB.get_setting("S3_SECRET_ACCESS_KEY") or os.environ.get("S3_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or "").strip()
+    s3_ready = bool(s3_bucket_cfg)
+    missing_s3: list[str] = []
+    if not s3_bucket_cfg:
+        missing_s3.append("S3_BUCKET")
+    if not s3_access_key:
+        missing_s3.append("S3_ACCESS_KEY_ID/AWS_ACCESS_KEY_ID")
+    if not s3_secret_key:
+        missing_s3.append("S3_SECRET_ACCESS_KEY/AWS_SECRET_ACCESS_KEY")
+
+    airflow_base = (DB.get_setting("NDAP_AIRFLOW_URL") or os.environ.get("NDAP_AIRFLOW_URL") or "").strip()
+    airflow_user = (DB.get_setting("NDAP_AIRFLOW_USER") or os.environ.get("NDAP_AIRFLOW_USER") or "").strip()
+    airflow_pass = (DB.get_setting("NDAP_AIRFLOW_PASSWORD") or os.environ.get("NDAP_AIRFLOW_PASSWORD") or "").strip()
+    airflow_dag_id = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
+    airflow_ready = bool(airflow_base) and bool(airflow_dag_id)
+    missing_airflow: list[str] = []
+    if not airflow_base:
+        missing_airflow.append("NDAP_AIRFLOW_URL")
+    if not airflow_user:
+        missing_airflow.append("NDAP_AIRFLOW_USER")
+    if not airflow_pass:
+        missing_airflow.append("NDAP_AIRFLOW_PASSWORD")
+    if not airflow_dag_id:
+        missing_airflow.append("loading_dag_id/NDAP_AIRFLOW_DAG_ID")
+
     return templates.TemplateResponse("load_type.html", {
         "request": request,
         "active_step": 0,
@@ -371,6 +357,10 @@ async def load_type_get(request: Request, reset: str | None = None):
         "run_id": run_id,
         "load_mode": load_mode,
         "show_stepper": False,
+        "settings_s3_ready": s3_ready,
+        "settings_airflow_ready": airflow_ready,
+        "missing_settings_s3": missing_s3,
+        "missing_settings_airflow": missing_airflow,
     })
 
 
@@ -378,6 +368,12 @@ async def load_type_get(request: Request, reset: str | None = None):
 async def load_type_save(request: Request, load_mode: str = Form("new")):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
+    # Enforce settings readiness on server side as well
+    s3_bucket_cfg = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
+    airflow_base = (DB.get_setting("NDAP_AIRFLOW_URL") or os.environ.get("NDAP_AIRFLOW_URL") or "").strip()
+    airflow_dag_id = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
+    if (not s3_bucket_cfg) or (not airflow_base) or (not airflow_dag_id):
+        return RedirectResponse(url="/load-type", status_code=302)
     # Start a new lifecycle token
     token = uuid4().hex
     run_id = _reset_run_id(request)

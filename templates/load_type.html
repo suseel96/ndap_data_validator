@@ -2,7 +2,35 @@
 
 {% block content %}
   <h4 class="mb-3">Select load type</h4>
+  {# normalize readiness and missing lists with safe defaults #}
+  {% set s3_ready = settings_s3_ready | default(true) %}
+  {% set airflow_ok = settings_airflow_ready | default(true) %}
+  {% set missing_s3 = missing_settings_s3 | default([]) %}
+  {% set missing_air = missing_settings_airflow | default([]) %}
+  {% set is_admin = request.session.get('is_admin') %}
+
+  {# For non-admin users show a single friendly message instead of detailed keys #}
+  {% if not is_admin and (not s3_ready or not airflow_ok) %}
+    <div class="alert alert-warning">
+      Settings not configured yet. Kindly inform your Admin to login and configure S3 and Airflow settings.
+    </div>
+  {% else %}
+    {% if (not s3_ready) and (missing_s3 | length > 0) %}
+      <div class="alert alert-warning">
+        S3 upload settings are incomplete. Missing: {{ ', '.join(missing_s3) }}.
+        <a href="/admin/settings" class="alert-link">Open Settings</a>
+      </div>
+    {% endif %}
+    {% if (not airflow_ok) and (missing_air | length > 0) %}
+      <div class="alert alert-warning">
+        Airflow trigger settings are incomplete. Missing: {{ ', '.join(missing_air) }}.
+        <a href="/admin/settings" class="alert-link">Open Settings</a>
+      </div>
+    {% endif %}
+  {% endif %}
+  {% set settings_ready = s3_ready and airflow_ok %}
   <form method="post" action="/load-type/save" class="card p-3 card-narrow">
+    {% if not settings_ready %}<fieldset disabled>{% endif %}
     <div class="list-group">
       <label class="list-group-item d-flex gap-2">
         <input class="form-check-input mt-1" type="radio" name="load_mode" value="new" {% if (load_mode or 'new') == 'new' %}checked{% endif %}>
@@ -33,7 +61,7 @@
         </span>
       </label>
     </div>
-    <button class="btn btn-primary mt-3" type="submit">Continue</button>
+    <button class="btn btn-primary mt-3" type="submit" {% if not settings_ready %}disabled title="Complete settings first"{% endif %}>Continue</button>
+    {% if not settings_ready %}</fieldset>{% endif %}
   </form>
 {% endblock %}
-
