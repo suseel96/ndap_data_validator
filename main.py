@@ -292,8 +292,50 @@ def trigger_airflow_dag(base_url: str, dag_id: str, username: str | None = None,
 async def index(request: Request, reset: str | None = None):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
-    # Always start new flow from Load Type when hitting root
-    return RedirectResponse(url="/load-type?reset=1", status_code=302)
+    run_id = request.session.get("current_run_id")
+    active_token = request.session.get("active_token")
+    if reset and reset.lower() in {"1", "true", "yes"}:
+        _clear_active_run(request)
+        run_id = _reset_run_id(request)
+        active_token = None
+    elif not run_id:
+        run_id = _reset_run_id(request)
+    completed_steps = _get_session_steps(request)
+    # If we already have a token (load type chosen), begin the stepper at Upload step
+    if active_token and VALIDATION_STATE.get(active_token):
+        st = VALIDATION_STATE.get(active_token) or {}
+        params = st.get("airflow_params", {}) if isinstance(st, dict) else {}
+        inc = bool(params.get("is_incremental"))
+        sch = bool(params.get("schema_exists"))
+        dsc = bool(params.get("delta_with_structure_change"))
+        if dsc:
+            load_mode = "structure_change"
+        elif inc and sch:
+            load_mode = "delta"
+        elif (not inc) and sch:
+            load_mode = "full_reload"
+        else:
+            load_mode = "new"
+        return templates.TemplateResponse("upload.html", {
+            "request": request,
+            "active_step": 1,
+            "title": "Upload",
+            "completed_steps": completed_steps,
+            "token": active_token,
+            "run_id": run_id,
+            "s3_folder_mode": False,
+            "load_mode": load_mode,
+        })
+    # Otherwise render load type selection outside of stepper
+    return templates.TemplateResponse("load_type.html", {
+        "request": request,
+        "active_step": 0,
+        "title": "Select Load Type",
+        "completed_steps": [],
+        "token": None,
+        "run_id": run_id,
+        "show_stepper": False,
+    })
 
 
 @app.get("/load-type", response_class=HTMLResponse)
