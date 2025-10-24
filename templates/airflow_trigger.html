@@ -19,6 +19,31 @@
     </div>
   {% endif %}
 
+  {% if airflow_triggered %}
+    <div class="alert alert-success d-flex align-items-center justify-content-between">
+      <div>
+        Airflow DAG triggered.
+        {% if airflow_dag_run_id %}
+          Run ID: <code>{{ airflow_dag_run_id }}</code>
+        {% endif %}
+        {% if airflow_run_url %}
+          &nbsp;|&nbsp;<a href="{{ airflow_run_url }}" class="alert-link" target="_blank" rel="noopener">Open in Airflow</a>
+        {% endif %}
+      </div>
+    </div>
+    {% if airflow_dag_run_id and airflow_dag_id %}
+      <div class="card mt-3" id="airflow-status-card" data-dag-id="{{ airflow_dag_id }}" data-run-id="{{ airflow_dag_run_id }}" data-token="{{ token }}">
+        <div class="card-header">Airflow Run Status</div>
+        <div class="card-body">
+          <div id="airflow-status-message" data-role="message" class="mb-2 text-muted">Checking Airflow run status...</div>
+          <div class="mb-2"><strong>Source Code:</strong> <span data-role="source-code">N/A</span></div>
+          <div id="airflow-status-error" data-role="tasks-error" class="text-warning small mb-2" style="display:none;"></div>
+          <div id="airflow-status-tasks" data-role="tasks" class="small"></div>
+        </div>
+      </div>
+    {% endif %}
+  {% endif %}
+
   <div class="card mb-3">
     <div class="card-body">
       {% if s3_folder_mode %}
@@ -57,40 +82,11 @@
         data-source-code="{{ s3_folder or '' }}">
     <input type="hidden" name="token" value="{{ token }}" />
     <input type="hidden" name="run_id" value="{{ run_id or '' }}" />
-    {% if airflow_ready and not airflow_triggered %}<fieldset>{% else %}<fieldset disabled>{% endif %}
-      <div class="mb-2">Select load type</div>
-      <div class="list-group">
-        <label class="list-group-item d-flex align-items-start gap-2">
-          <input class="form-check-input mt-1" type="radio" name="load_mode" value="new" {% if load_mode == 'new' %}checked{% endif %}>
-          <span>
-            <div class="fw-semibold">New dataset</div>
-            <div class="small text-muted">Upload a new dataset</div>
-          </span>
-        </label>
-        <label class="list-group-item d-flex align-items-start gap-2">
-          <input class="form-check-input mt-1" type="radio" name="load_mode" value="full_reload" {% if load_mode == 'full_reload' %}checked{% endif %}>
-          <span>
-            <div class="fw-semibold">Existing dataset - Full Reload</div>
-            <div class="small text-muted">Full reload by wiping all existing data</div>
-          </span>
-        </label>
-        <label class="list-group-item d-flex align-items-start gap-2">
-          <input class="form-check-input mt-1" type="radio" name="load_mode" value="delta" {% if load_mode == 'delta' %}checked{% endif %}>
-          <span>
-            <div class="fw-semibold">Existing dataset - Delta Loading</div>
-            <div class="small text-muted">Load only delta data without wiping data</div>
-          </span>
-        </label>
-        <label class="list-group-item d-flex align-items-start gap-2">
-          <input class="form-check-input mt-1" type="radio" name="load_mode" value="structure_change" {% if load_mode == 'structure_change' %}checked{% endif %}>
-          <span>
-            <div class="fw-semibold">Existing dataset - Structure change</div>
-            <div class="small text-muted">Handle structure changes for existing dataset</div>
-          </span>
-        </label>
-      </div>
-    </fieldset>
-    <button class="btn btn-primary mt-3" type="button" id="openConfirmBtn" {% if not airflow_ready or airflow_triggered %}disabled{% endif %}>Trigger DAG</button>
+    <!-- Load type is already selected in Validate step, no inputs here -->
+    <div id="triggerBar">
+      <button class="btn btn-primary mt-3" type="button" id="openConfirmBtn" {% if not airflow_ready or airflow_triggered %}disabled{% endif %}>Trigger DAG</button>
+    </div>
+    <a href="/load-type?reset=1" id="startOverLink" class="btn btn-outline-primary mt-3 d-none">Start over</a>
   </form>
   
   <!-- Confirm Modal -->
@@ -129,6 +125,8 @@
       const modalEl = document.getElementById('confirmModal');
       const confirmBtn = document.getElementById('confirmTriggerBtn');
       const openBtn = document.getElementById('openConfirmBtn');
+      const startOverLink = document.getElementById('startOverLink');
+      const triggerBar = document.getElementById('triggerBar');
       let modal;
       let pending = false;
       function yesNo(v){ return v ? 'yes' : 'no'; }
@@ -192,6 +190,79 @@
           form.submit();
         });
       }
+    })();
+    // Status polling if we have a triggered run
+    (function(){
+      const card = document.getElementById('airflow-status-card');
+      if (!card) return;
+      const triggerForm = document.getElementById('airflowForm');
+      const mode = (triggerForm && triggerForm.dataset && triggerForm.dataset.loadMode ? triggerForm.dataset.loadMode : 'new').toLowerCase();
+      let providedSource = '';
+      if (mode !== 'new' && triggerForm && triggerForm.dataset){
+        if ((triggerForm.dataset.s3FolderMode || 'false') === 'true'){
+          let pref = (triggerForm.dataset.s3Folder || '').replace(/^\/+|\/+$/g, '');
+          const idx = pref.indexOf('/pending');
+          if (idx >= 0) pref = pref.substring(0, idx);
+          if (pref.includes('/')) providedSource = pref.split('/').pop(); else providedSource = pref;
+        } else {
+          providedSource = (triggerForm.dataset.s3Folder || '');
+        }
+      }
+      const startOverLink = document.getElementById('startOverLink');
+      const triggerBar = document.getElementById('triggerBar');
+      const dagId = card.getAttribute('data-dag-id');
+      const runId = card.getAttribute('data-run-id');
+      const tokenValue = card.getAttribute('data-token') || '';
+      const messageEl = card.querySelector('[data-role="message"]');
+      const tasksEl = card.querySelector('[data-role="tasks"]');
+      const errorEl = card.querySelector('[data-role="tasks-error"]');
+      const sourceEl = card.querySelector('[data-role="source-code"]');
+      const capitalizeWords = (v) => String(v||'').replace(/\b\w/g, (ch)=>ch.toUpperCase());
+      const normalizeLog = (v) => String(v||'').replace(/\r\n/g,'\n').replace(/\\r\\n/g,'\n').replace(/\\n/g,'\n').replace(/\\t/g,'\t');
+      const escapeHtml = (value) => String(value || '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[ch]||ch));
+      let polling = true;
+      function finish(){
+        if (triggerBar) triggerBar.classList.add('d-none');
+        if (startOverLink) startOverLink.classList.remove('d-none');
+      }
+      async function poll(){
+        if (!polling) return;
+        try {
+          const params = new URLSearchParams({ dag_id: dagId, dag_run_id: runId });
+          if (tokenValue) params.append('token', tokenValue);
+          const resp = await fetch(`/airflow/run-status?${params.toString()}`);
+          if (!resp.ok){ messageEl.textContent = `Unable to fetch Airflow status (HTTP ${resp.status}).`; polling=false; return; }
+          const data = await resp.json();
+          messageEl.textContent = data.state ? '' : 'State is not available yet.';
+          if (data.tasks_error){ errorEl.style.display=''; errorEl.textContent = `Task details unavailable: ${data.tasks_error}`; }
+          else { errorEl.style.display='none'; errorEl.textContent=''; }
+          if (sourceEl){
+            const codeValue = (data.source_code || '').toString().trim();
+            if (mode !== 'new' && providedSource){
+              sourceEl.textContent = providedSource;
+            } else {
+              sourceEl.textContent = codeValue ? codeValue : 'N/A';
+            }
+          }
+          if (Array.isArray(data.tasks) && data.tasks.length){
+            tasksEl.innerHTML = data.tasks.map((task)=>{
+              const state = (task.state || 'unknown').toLowerCase();
+              const badgeClass = state==='success'?'bg-success':state==='failed'?'bg-danger':state==='running'?'bg-warning text-dark':'bg-secondary';
+              const rawTaskId = task.task_id || 'unknown';
+              const prettyTaskId = capitalizeWords(rawTaskId.replace(/_/g, ' '));
+              const badgeLabel = capitalizeWords(task.state || 'unknown');
+              const headerLabel = data.tasks.length>1 ? prettyTaskId : 'Status';
+              const header = `<strong>${escapeHtml(headerLabel)}</strong> <span class="badge ${badgeClass} ms-2">${escapeHtml(badgeLabel)}</span>`;
+              const logText = normalizeLog(task.log || 'No log content yet.');
+              return `<details class="mb-2"><summary>${header}</summary><pre class="bg-light p-2 rounded">${escapeHtml(logText)}</pre></details>`;
+            }).join('');
+          } else {
+            tasksEl.innerHTML = '<p class="text-muted mb-0">No task updates yet.</p>';
+          }
+          if (!data.complete){ setTimeout(poll, 5000); } else { polling=false; finish(); }
+        } catch(e){ messageEl.textContent='Error fetching Airflow status.'; polling=false; }
+      }
+      poll();
     })();
   </script>
 {% endblock %}

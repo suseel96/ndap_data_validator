@@ -107,6 +107,7 @@ class Database:
             con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS dag_run_id TEXT;")
             con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS source_code TEXT;")
             con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS run_id TEXT;")
+            con.execute("ALTER TABLE upload_logs ADD COLUMN IF NOT EXISTS load_mode TEXT;")
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS app_settings (
@@ -253,15 +254,16 @@ class Database:
         dag_run_id: Optional[str] = None,
         source_code: Optional[str] = None,
         run_id: Optional[str] = None,
+        load_mode: Optional[str] = None,
     ) -> None:
         con = self.connect()
         try:
             con.execute(
                 """
                 INSERT INTO upload_logs (
-                  id, token, run_id, username, bucket, object_key, s3_uri, cleaned, status, comments, dag_status, dag_run_id, source_code
+                  id, token, run_id, username, bucket, object_key, s3_uri, cleaned, status, comments, dag_status, dag_run_id, source_code, load_mode
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     self._new_id(),
@@ -277,6 +279,7 @@ class Database:
                     dag_status or "",
                     dag_run_id or "",
                     source_code or "",
+                    load_mode or "",
                 ],
             )
         finally:
@@ -412,6 +415,7 @@ class Database:
         s3_uri: Optional[str] = None,
         status: Optional[str] = None,
         run_id: Optional[str] = None,
+        load_mode: Optional[str] = None,
     ) -> None:
         con = self.connect()
         try:
@@ -435,6 +439,9 @@ class Database:
             if run_id is not None:
                 updates.append("run_id = ?")
                 params.append(run_id)
+            if load_mode is not None:
+                updates.append("load_mode = ?")
+                params.append(load_mode)
             if not updates:
                 updates.append("created_at = created_at")
             params.append(token)
@@ -456,8 +463,8 @@ class Database:
                 con.execute(
                     """
                     INSERT INTO upload_logs (
-                      id, token, run_id, username, bucket, object_key, s3_uri, cleaned, status, comments, dag_status, dag_run_id, source_code
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      id, token, run_id, username, bucket, object_key, s3_uri, cleaned, status, comments, dag_status, dag_run_id, source_code, load_mode
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         self._new_id(),
@@ -473,6 +480,7 @@ class Database:
                         dag_status or "",
                         dag_run_id or "",
                         source_code or "",
+                        load_mode or "",
                     ],
                 )
         finally:
@@ -535,7 +543,8 @@ class Database:
                     CASE WHEN NULLIF(u.source_code, '') IS NULL THEN 'N/A' ELSE u.source_code END AS source_code,
                     COALESCE(NULLIF(u.dag_run_id, ''), '') AS dag_run_id,
                     COALESCE(NULLIF(up.run_id, ''), NULLIF(u.run_id, ''), NULLIF(v.run_id, ''), '') AS run_id,
-                    t.token AS token
+                    t.token AS token,
+                    COALESCE(NULLIF(u.load_mode, ''), '') AS load_mode
                 FROM tokens t
                 LEFT JOIN latest_upload u ON u.token = t.token AND u.rn = 1
                 LEFT JOIN latest_validation v ON v.token = t.token AND v.rn = 1
@@ -563,6 +572,7 @@ class Database:
                 "dag_run_id",
                 "run_id",
                 "token",
+                "load_mode",
             ]
             results = []
             for row in rows:

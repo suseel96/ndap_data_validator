@@ -2,7 +2,7 @@
 
 {% block content %}
   <div class="page-header d-flex align-items-center justify-content-between mb-3">
-    <h4 class="m-0">Step 1: Upload CSV or Enter S3 Folder</h4>
+    <h4 class="m-0">Step 1: Upload CSV or Enter {% if (load_mode or 'new') == 'new' %}S3 Folder{% else %}Source Code{% endif %}</h4>
   </div>
   <style>
     .disabled-block { position: relative; opacity: .6; }
@@ -15,7 +15,10 @@
 
       <div class="mb-3" id="fileBlock">
         <label class="form-label">Upload CSV file <span id="fileDisabledBadge" class="badge bg-secondary disabled-badge d-none">Disabled (S3 selected)</span></label>
-        <input type="file" id="fileInput" name="file" accept=".csv" class="form-control" />
+        <div class="input-group">
+          <input type="file" id="fileInput" name="file" accept=".csv" class="form-control" />
+          <button class="btn btn-outline-secondary d-none" type="button" id="clearFileBtn" title="Clear selection">&times;</button>
+        </div>
         <div class="form-text">If your file is larger than 300MB, please split it and use the S3 folder option below.</div>
       </div>
 
@@ -26,9 +29,18 @@
       </div>
 
       <div class="mb-3" id="s3Block">
-        <label class="form-label">Provide an S3 folder path <span id="s3DisabledBadge" class="badge bg-secondary disabled-badge d-none">Disabled (file selected)</span></label>
-        <input type="text" id="s3Input" name="s3_folder" class="form-control" placeholder="e.g. s3://my-bucket/path/to/folder/ or just path/to/folder/" />
-        <div class="form-text">We'll sample 10 rows from one CSV for preview, then validate all CSV files in this folder.</div>
+        <label class="form-label">{% if (load_mode or 'new') == 'new' %}Provide an S3 folder path{% else %}Provide Source Code{% endif %} <span id="s3DisabledBadge" class="badge bg-secondary disabled-badge d-none">Disabled (file selected)</span></label>
+        <div class="input-group">
+          <input type="text" id="s3Input" name="s3_folder" class="form-control" placeholder="{% if (load_mode or 'new') == 'new' %}e.g. s3://my-bucket/path/to/folder/ or just path/to/folder/{% else %}Enter source code (we will use sourcecode/pending){% endif %}" />
+          <button class="btn btn-outline-secondary d-none" type="button" id="clearS3Btn" title="Clear path">&times;</button>
+        </div>
+        <div class="form-text">
+          {% if (load_mode or 'new') == 'new' %}
+            We'll sample 10 rows from one CSV for preview, then validate all CSV files in this folder.
+          {% else %}
+            We'll look for files under <code>s3://&lt;bucket&gt;/&lt;sourcecode&gt;/pending/</code> for preview and validation.
+          {% endif %}
+        </div>
       </div>
 
       <div class="mb-3">
@@ -55,6 +67,7 @@
   <script>
     // Client-side guard + dynamic loader + mutual exclusion
     (function(){
+      window.LOAD_MODE = '{{ load_mode or 'new' }}';
       const form = document.getElementById('startForm');
       const fileInput = document.getElementById('fileInput');
       const s3Input = document.getElementById('s3Input');
@@ -62,6 +75,8 @@
       const s3Block = document.getElementById('s3Block');
       const fileBadge = document.getElementById('fileDisabledBadge');
       const s3Badge = document.getElementById('s3DisabledBadge');
+      const clearFileBtn = document.getElementById('clearFileBtn');
+      const clearS3Btn = document.getElementById('clearS3Btn');
 
       function syncInputs(){
         const fileChosen = !!(fileInput && fileInput.files && fileInput.files.length > 0);
@@ -70,32 +85,68 @@
           if (s3Input) s3Input.setAttribute('disabled','disabled');
           if (s3Block) s3Block.classList.add('disabled-block'); else {}
           if (s3Badge) s3Badge.classList.remove('d-none');
+          if (clearFileBtn) clearFileBtn.classList.remove('d-none');
         } else {
           if (s3Input) s3Input.removeAttribute('disabled');
           if (s3Block) s3Block.classList.remove('disabled-block');
           if (s3Badge) s3Badge.classList.add('d-none');
+          if (clearFileBtn) clearFileBtn.classList.add('d-none');
         }
         if (s3Chosen) {
           if (fileInput) fileInput.setAttribute('disabled','disabled');
           if (fileBlock) fileBlock.classList.add('disabled-block');
           if (fileBadge) fileBadge.classList.remove('d-none');
+          if (clearS3Btn) clearS3Btn.classList.remove('d-none');
         } else {
           if (fileInput) fileInput.removeAttribute('disabled');
           if (fileBlock) fileBlock.classList.remove('disabled-block');
           if (fileBadge) fileBadge.classList.add('d-none');
+          if (clearS3Btn) clearS3Btn.classList.add('d-none');
         }
       }
       fileInput && fileInput.addEventListener('change', syncInputs);
       s3Input && s3Input.addEventListener('input', syncInputs);
+      if (clearFileBtn) {
+        clearFileBtn.addEventListener('click', function(){
+          if (fileInput) fileInput.value = '';
+          // Re-enable S3 input and update UI
+          if (s3Input) s3Input.removeAttribute('disabled');
+          syncInputs();
+          fileInput && fileInput.focus();
+        });
+      }
+      if (clearS3Btn) {
+        clearS3Btn.addEventListener('click', function(){
+          if (s3Input) {
+            s3Input.removeAttribute('disabled');
+            s3Input.value = '';
+          }
+          if (fileInput) fileInput.removeAttribute('disabled');
+          syncInputs();
+          s3Input && s3Input.focus();
+        });
+      }
       syncInputs();
 
       form.addEventListener('submit', function(e){
         const file = fileInput && fileInput.files[0];
-        const s3 = (s3Input && s3Input.value || '').trim();
+        let s3 = (s3Input && s3Input.value || '').trim();
+        // Pre-submit size guard: 300 MB
+        if (file && file.size > 300 * 1024 * 1024) {
+          e.preventDefault();
+          alert('File is larger than 300MB (' + Math.floor(file.size/1024/1024) + ' MB). Please split the file and use the S3 folder option.');
+          return;
+        }
         if (!file && !s3) {
           e.preventDefault();
           alert('Please upload a CSV or provide an S3 folder path.');
           return;
+        }
+        // If non-new mode and S3 text provided, treat input as source code and convert to <source>/pending/
+        if (!file && s3 && window.LOAD_MODE && window.LOAD_MODE !== 'new') {
+          s3 = s3.replace(/\s+/g,'').replace(/\/+$/,'');
+          const derived = s3 ? (s3 + '/pending/') : '';
+          if (s3Input) s3Input.value = derived;
         }
         if (typeof window.showLoader === 'function') {
           window.showLoader(s3 ? 'Reading sample from S3 and preparing preview...' : 'Uploading file and preparing preview...');

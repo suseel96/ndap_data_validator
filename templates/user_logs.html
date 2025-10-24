@@ -20,6 +20,7 @@
               <th>Upload comments</th>
               <th>Airflow DAG status</th>
               <th>Source code</th>
+              <th>Load type</th>
               <th>DAG Run ID</th>
             </tr>
           </thead>
@@ -38,12 +39,13 @@
                   <td>{{ row.upload_comments or '' }}</td>
                   <td data-col="airflow-status">{{ row.airflow_status or 'Not triggered' }}</td>
                   <td data-col="source-code">{{ row.source_code or 'N/A' }}</td>
+                  <td data-col="load-mode">{% set lm = row.load_mode or '' %}{% set lm_label = '' %}{% if lm == 'full_reload' %}{% set lm_label = 'Existing dataset - Full Reload' %}{% elif lm == 'delta' %}{% set lm_label = 'Existing dataset - Delta Loading' %}{% elif lm == 'structure_change' %}{% set lm_label = 'Existing dataset - Structure change' %}{% elif lm == 'new' %}{% set lm_label = 'New dataset' %}{% endif %}{{ lm_label }}</td>
                   <td data-col="dag-run-id"><code>{{ row.dag_run_id or '' }}</code></td>
                 </tr>
               {% endfor %}
             {% else %}
               <tr>
-                <td colspan="12" class="text-center text-muted py-3">No log entries found.</td>
+                <td colspan="13" class="text-center text-muted py-3">No log entries found.</td>
               </tr>
             {% endif %}
           </tbody>
@@ -110,4 +112,6 @@
     })();
   </script>
 {% endblock %}
+
+
 

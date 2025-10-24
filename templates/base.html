@@ -22,7 +22,7 @@
     </div>
     <header class="app-header py-2 px-3 border-bottom">
       <div class="container-fluid d-flex align-items-center justify-content-between">
-        <h5 class="m-0 brand-title"><a href="/" class="brand-title-link">NDAP Data Validator</a></h5>
+        <h5 class="m-0 brand-title"><a href="/load-type?reset=1" class="brand-title-link">NDAP Data Validator</a></h5>
         <div>
           {% if request.session.get('username') %}
             <span class="me-2">Signed in as <strong>{{ request.session.get('username') }}</strong></span>
@@ -31,7 +31,7 @@
               <a class="btn btn-sm btn-outline-primary me-2" href="/admin/logs">Logs</a>
               <a class="btn btn-sm btn-outline-primary me-2" href="/admin/settings">Settings</a>
             {% endif %}
-            <a class="btn btn-sm btn-outline-primary me-2" href="/?reset=1">Upload New File</a>
+            <a class="btn btn-sm btn-outline-primary me-2" href="/load-type?reset=1">Upload New File</a>
             <a class="btn btn-sm btn-outline-primary me-2" href="/logs">My Logs</a>
             <a class="btn btn-sm btn-primary" href="/logout">Logout</a>
           {% else %}
@@ -47,8 +47,16 @@
       {% if show_stepper | default(true) %}
       <div class="pt-3 pb-2">
         {% if run_id %}
-        <div class="mb-2">
+        <div class="mb-2 d-flex align-items-center gap-2 flex-wrap">
           <span class="badge bg-light text-dark border">Tracking ID: <code>{{ run_id }}</code></span>
+          {% set lm = request.session.get('load_mode') %}
+          {% if lm %}
+            {% set lm_label = 'New dataset' %}
+            {% if lm == 'full_reload' %}{% set lm_label = 'Existing dataset - Full Reload' %}{% endif %}
+            {% if lm == 'delta' %}{% set lm_label = 'Existing dataset - Delta Loading' %}{% endif %}
+            {% if lm == 'structure_change' %}{% set lm_label = 'Existing dataset - Structure change' %}{% endif %}
+            <span class="badge bg-primary">Load type: {{ lm_label }}</span>
+          {% endif %}
         </div>
         {% endif %}
         <ol class="stepper stepper-horizontal list-unstyled d-flex gap-4 flex-wrap">
@@ -61,12 +69,12 @@
             {% if active_step > 1 and not lock_backwards %}
               <a href="/" class="step-link">
                 <div class="step-icon">1</div>
-                <div class="step-title">Select S3 folder and preview</div>
+                <div class="step-title">Upload CSV and preview</div>
               </a>
             {% else %}
               <span class="step-link{% if active_step < 1 %} disabled{% endif %}">
                 <div class="step-icon">1</div>
-                <div class="step-title">Select S3 folder and preview</div>
+                <div class="step-title">Upload CSV and preview</div>
               </span>
             {% endif %}
           </li>

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <h4 class="mb-3">Select load type</h4>
+  <form method="post" action="/load-type/save" class="card p-3 card-narrow">
+    <div class="list-group">
+      <label class="list-group-item d-flex gap-2">
+        <input class="form-check-input mt-1" type="radio" name="load_mode" value="new" {% if (load_mode or 'new') == 'new' %}checked{% endif %}>
+        <span>
+          <div class="fw-semibold">New dataset</div>
+          <div class="small text-muted">Upload a new dataset</div>
+        </span>
+      </label>
+      <label class="list-group-item d-flex gap-2">
+        <input class="form-check-input mt-1" type="radio" name="load_mode" value="full_reload" {% if load_mode == 'full_reload' %}checked{% endif %}>
+        <span>
+          <div class="fw-semibold">Existing dataset - Full Reload</div>
+          <div class="small text-muted">Full reload by wiping all existing data.<br>Choose this when you want to reload the complete data of an existing dataset/sourcecode.<br>Make sure the datafle contains the complete data to reload.</div>
+        </span>
+      </label>
+      <label class="list-group-item d-flex gap-2">
+        <input class="form-check-input mt-1" type="radio" name="load_mode" value="delta" {% if load_mode == 'delta' %}checked{% endif %}>
+        <span>
+          <div class="fw-semibold">Existing dataset - Delta Loading</div>
+          <div class="small text-muted">Load only delta data without wiping existing data.<br>Choose this when you want to append additional data to an existing dataset/sourcecode.<br>Make sure the datafle contains only the new data to append.</div>
+        </span>
+      </label>
+      <label class="list-group-item d-flex gap-2">
+        <input class="form-check-input mt-1" type="radio" name="load_mode" value="structure_change" {% if load_mode == 'structure_change' %}checked{% endif %}>
+        <span>
+          <div class="fw-semibold">Existing dataset - Structure change</div>
+          <div class="small text-muted">Handle structure changes for existing dataset.<br>Choose this when you want to reload the complete data of an existing dataset/sourcecode due to change in structure of latest data.<br>Make sure the datafle contains the complete data to reload according to the new data structure.</div>
+        </span>
+      </label>
+    </div>
+    <button class="btn btn-primary mt-3" type="submit">Continue</button>
+  </form>
+{% endblock %}
+
