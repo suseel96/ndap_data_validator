@@ -506,6 +506,13 @@ async def preview(
             in_prefix = (in_prefix or "").lstrip("/")
             if in_prefix and not in_prefix.endswith("/"):
                 in_prefix = in_prefix + "/"
+            # Always search under '<path>/pending/' for validation/preview (all modes).
+            # Avoid duplicating 'pending' and normalize to a single trailing slash.
+            p = in_prefix.rstrip("/")
+            if not p.lower().endswith("/pending") and not p.lower().endswith("pending"):
+                in_prefix = (p + "/pending/") if p else "pending/"
+            else:
+                in_prefix = p + "/"
 
             if not in_bucket:
                 raise ValueError("S3 bucket is not configured. Please set S3_BUCKET in Settings.")
@@ -1665,19 +1672,37 @@ async def airflow_trigger_post(
     pwd = password
 
     # Build conf (include delta_with_structure_change)
+    # Ensure source_code passed to Airflow does NOT include trailing '/pending'.
+    def _source_code_for_airflow(val: str, bucket: str | None = None) -> str:
+        v = (val or "").strip()
+        # Strip s3://bucket/ if accidentally present
+        if v.lower().startswith("s3://"):
+            rest = v[5:]
+            parts = rest.split("/", 1)
+            if len(parts) == 2:
+                v = parts[1]
+            else:
+                v = ""
+        # Tokenize and drop any trailing 'pending' segment(s) and empties
+        parts = [p for p in v.split('/') if p]
+        while parts and parts[-1].lower() == 'pending':
+            parts.pop()
+        v = '/'.join(parts)
+        return v
+
     if s3_folder_mode:
         # Prefer override
         src_override = (state.get("source_code_override") or "").strip() if isinstance(state, dict) else ""
         source_code_value = src_override or folder_value
         conf_obj = {
-            "source_code": source_code_value,
+            "source_code": _source_code_for_airflow(source_code_value, s3_bucket),
             "is_incremental": "yes" if inc_bool else "no",
             "schema_exist": "yes" if schema_bool else "no",
             "delta_with_structure_change": "yes" if delta_struct_bool else "no",
         }
     else:
         conf_obj = {
-            "source_code": folder_value,
+            "source_code": _source_code_for_airflow(folder_value, s3_bucket),
             "is_incremental": "yes" if inc_bool else "no",
             "schema_exist": "yes" if schema_bool else "no",
             "delta_with_structure_change": "yes" if delta_struct_bool else "no",
