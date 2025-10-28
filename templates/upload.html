@@ -142,11 +142,25 @@
           alert('Please upload a CSV or provide an S3 folder path.');
           return;
         }
-        // If non-new mode and S3 text provided, treat input as source code and convert to <source>/pending/
+        // In non-new modes, only derive <source>/pending/ when the user
+        // enters a plain source code (no slashes, not an s3:// URL).
+        // If a full S3 path is provided, do not append '/pending/' again.
         if (!file && s3 && window.LOAD_MODE && window.LOAD_MODE !== 'new') {
           s3 = s3.replace(/\s+/g,'').replace(/\/+$/,'');
-          const derived = s3 ? (s3 + '/pending/') : '';
-          if (s3Input) s3Input.value = derived;
+          const isFullS3 = /^s3:\/\//i.test(s3);
+          const looksLikePath = s3.includes('/');
+          if (!isFullS3 && !looksLikePath) {
+            const derived = s3 ? (s3 + '/pending/') : '';
+            if (s3Input) s3Input.value = derived;
+          } else {
+            // If user already provided a path, avoid duplicating 'pending'
+            // and keep at most one trailing slash.
+            if (/\/pending\/?$/i.test(s3)) {
+              s3Input.value = s3.endsWith('/') ? s3 : (s3 + '/');
+            } else {
+              s3Input.value = s3;
+            }
+          }
         }
         if (typeof window.showLoader === 'function') {
           window.showLoader(s3 ? 'Reading sample from S3 and preparing preview...' : 'Uploading file and preparing preview...');

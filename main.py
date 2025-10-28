@@ -510,9 +510,37 @@ async def preview(
             if not in_bucket:
                 raise ValueError("S3 bucket is not configured. Please set S3_BUCKET in Settings.")
 
-            all_keys = uploader.list_objects(in_bucket, in_prefix)
-            # pick first CSV-like key
-            csv_keys = [k for k in all_keys if k.lower().endswith(".csv")]
+            # List CSVs robustly: try with/without trailing slash, retry once
+            def _find_csvs(bucket: str, prefix: str) -> List[str]:
+                candidates = []
+                p = (prefix or "").lstrip("/")
+                forms = []
+                if p:
+                    # try as-given, without slash, and with slash
+                    forms = [p, p.rstrip("/"), p.rstrip("/") + "/"]
+                else:
+                    forms = [""]
+                seen = set()
+                out: List[str] = []
+                for f in forms:
+                    try:
+                        keys = uploader.list_objects(bucket, f)
+                    except Exception:
+                        keys = []
+                    for k in keys:
+                        if k in seen:
+                            continue
+                        seen.add(k)
+                        if k.lower().endswith(".csv"):
+                            out.append(k)
+                # consistent order
+                out.sort()
+                return out
+
+            csv_keys = _find_csvs(in_bucket, in_prefix)
+            if not csv_keys:
+                # quick retry once in case of transient list hiccup
+                csv_keys = _find_csvs(in_bucket, in_prefix)
             if not csv_keys:
                 raise ValueError("No CSV files found in the provided S3 folder.")
             sample_key = csv_keys[0]
