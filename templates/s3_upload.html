@@ -20,21 +20,31 @@
     <input type="hidden" name="run_id" value="{{ run_id or '' }}" />
 
     {% if not settings_ready %}<fieldset disabled>{% endif %}
-    <div class="row g-3">
-      <div class="col-md-6">
-        <label class="form-label">File name including extension (to save in AWS S3)</label>
-        <input class="form-control" type="text" name="object_key_name" value="{{ object_key_value }}" required />
+    {% if (load_mode or 'new') == 'new' %}
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label">File name including extension (to save in AWS S3)</label>
+          <input class="form-control" type="text" name="object_key_name" value="{{ object_key_value }}" required />
+        </div>
       </div>
-    </div>
 
-    <hr class="my-4" />
-    <div class="row g-3">
-      <div class="col-md-6">
-        <label class="form-label">S3 folder name</label>
-        <input class="form-control" type="text" name="s3_folder_name" value="{{ s3_folder_value }}" placeholder="folder-name without /" required />
-        <div class="form-text">The uploaded file will be saved inside this folder with a <code>/pending/</code> suffix.</div>
+      <hr class="my-4" />
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label">S3 folder name</label>
+          <input class="form-control" type="text" name="s3_folder_name" value="{{ s3_folder_value }}" placeholder="folder-name without /" required />
+          <div class="form-text">The uploaded file will be saved inside this folder with a <code>/pending/</code> suffix.</div>
+        </div>
       </div>
-    </div>
+    {% else %}
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label">Source Code</label>
+          <input class="form-control" type="text" name="source_code_value" placeholder="Enter source code" required />
+          <div class="form-text">We will save as <code>sourcecode/pending/sourcecode.csv</code> in S3.</div>
+        </div>
+      </div>
+    {% endif %}
 
     {% if not settings_ready %}</fieldset>{% endif %}
     <button class="btn btn-primary mt-3" type="submit">Upload to S3</button>

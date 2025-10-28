@@ -161,6 +161,42 @@ def _get_meta(token: str) -> Dict[str, object]:
             pass
     return {"file_name": file_name, "record_count": record_count, "run_id": run_id}
 
+
+@app.post("/load-mode")
+async def set_load_mode(
+    request: Request,
+    token: str = Form(...),
+    load_mode: str = Form("new"),
+    next: str | None = Form(None),
+):
+    if not require_login(request):
+        return RedirectResponse(url="/login", status_code=302)
+    state = VALIDATION_STATE.setdefault(token, {})
+    mode = (load_mode or "").strip().lower()
+    inc_bool = False
+    schema_bool = False
+    delta_struct_bool = False
+    if mode == "full_reload":
+        inc_bool = False; schema_bool = True; delta_struct_bool = False
+    elif mode == "delta":
+        inc_bool = True; schema_bool = True; delta_struct_bool = False
+    elif mode == "structure_change":
+        inc_bool = False; schema_bool = False; delta_struct_bool = True
+    else:
+        inc_bool = False; schema_bool = False; delta_struct_bool = False
+    state["airflow_params"] = {
+        "is_incremental": inc_bool,
+        "schema_exists": schema_bool,
+        "delta_with_structure_change": delta_struct_bool,
+    }
+    _set_active_token(request, token)
+    if next == "airflow":
+        return RedirectResponse(url=f"/airflow-trigger?token={token}", status_code=303)
+    elif next == "upload":
+        return RedirectResponse(url=f"/upload?token={token}", status_code=303)
+    else:
+        return RedirectResponse(url=f"/validate?token={token}", status_code=303)
+
 def _ensure_url_scheme(url: str, default: str = "http") -> str:
     if not url:
         return ""
@@ -261,18 +297,150 @@ async def index(request: Request, reset: str | None = None):
     if reset and reset.lower() in {"1", "true", "yes"}:
         _clear_active_run(request)
         run_id = _reset_run_id(request)
+        active_token = None
     elif not run_id:
         run_id = _reset_run_id(request)
     completed_steps = _get_session_steps(request)
-    return templates.TemplateResponse("upload.html", {
-        "request": request, 
-        "active_step": 1, 
-        "title": "Upload",
-        "completed_steps": completed_steps,
-        "token": active_token,
+    # If we already have a token (load type chosen), begin the stepper at Upload step
+    if active_token and VALIDATION_STATE.get(active_token):
+        st = VALIDATION_STATE.get(active_token) or {}
+        params = st.get("airflow_params", {}) if isinstance(st, dict) else {}
+        inc = bool(params.get("is_incremental"))
+        sch = bool(params.get("schema_exists"))
+        dsc = bool(params.get("delta_with_structure_change"))
+        if dsc:
+            load_mode = "structure_change"
+        elif inc and sch:
+            load_mode = "delta"
+        elif (not inc) and sch:
+            load_mode = "full_reload"
+        else:
+            load_mode = "new"
+        return templates.TemplateResponse("upload.html", {
+            "request": request,
+            "active_step": 1,
+            "title": "Upload",
+            "completed_steps": completed_steps,
+            "token": active_token,
+            "run_id": run_id,
+            "s3_folder_mode": False,
+            "load_mode": load_mode,
+        })
+    # Otherwise render load type selection outside of stepper
+    return templates.TemplateResponse("load_type.html", {
+        "request": request,
+        "active_step": 0,
+        "title": "Select Load Type",
+        "completed_steps": [],
+        "token": None,
         "run_id": run_id,
-        "s3_folder_mode": False,
+        "show_stepper": False,
     })
+
+
+@app.get("/load-type", response_class=HTMLResponse)
+async def load_type_get(request: Request, reset: str | None = None):
+    if not require_login(request):
+        return RedirectResponse(url="/login", status_code=302)
+    if reset and reset.lower() in {"1","true","yes"}:
+        _clear_active_run(request)
+    run_id = request.session.get("current_run_id") or _reset_run_id(request)
+    active_token = None  # force selection screen outside stepper when reset
+    # Preselect from active token if present
+    load_mode = "new"
+    if active_token and active_token in VALIDATION_STATE:
+        st = VALIDATION_STATE.get(active_token) or {}
+        params = st.get("airflow_params", {}) if isinstance(st, dict) else {}
+        inc = bool(params.get("is_incremental"))
+        sch = bool(params.get("schema_exists"))
+        dsc = bool(params.get("delta_with_structure_change"))
+        if dsc:
+            load_mode = "structure_change"
+        elif inc and sch:
+            load_mode = "delta"
+        elif (not inc) and sch:
+            load_mode = "full_reload"
+        else:
+            load_mode = "new"
+    # Early settings precheck (surface warnings on first step)
+    s3_bucket_cfg = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
+    s3_access_key = (DB.get_setting("S3_ACCESS_KEY_ID") or os.environ.get("S3_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID") or "").strip()
+    s3_secret_key = (DB.get_setting("S3_SECRET_ACCESS_KEY") or os.environ.get("S3_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or "").strip()
+    s3_ready = bool(s3_bucket_cfg)
+    missing_s3: list[str] = []
+    if not s3_bucket_cfg:
+        missing_s3.append("S3_BUCKET")
+    if not s3_access_key:
+        missing_s3.append("S3_ACCESS_KEY_ID/AWS_ACCESS_KEY_ID")
+    if not s3_secret_key:
+        missing_s3.append("S3_SECRET_ACCESS_KEY/AWS_SECRET_ACCESS_KEY")
+
+    airflow_base = (DB.get_setting("NDAP_AIRFLOW_URL") or os.environ.get("NDAP_AIRFLOW_URL") or "").strip()
+    airflow_user = (DB.get_setting("NDAP_AIRFLOW_USER") or os.environ.get("NDAP_AIRFLOW_USER") or "").strip()
+    airflow_pass = (DB.get_setting("NDAP_AIRFLOW_PASSWORD") or os.environ.get("NDAP_AIRFLOW_PASSWORD") or "").strip()
+    airflow_dag_id = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
+    airflow_ready = bool(airflow_base) and bool(airflow_dag_id)
+    missing_airflow: list[str] = []
+    if not airflow_base:
+        missing_airflow.append("NDAP_AIRFLOW_URL")
+    if not airflow_user:
+        missing_airflow.append("NDAP_AIRFLOW_USER")
+    if not airflow_pass:
+        missing_airflow.append("NDAP_AIRFLOW_PASSWORD")
+    if not airflow_dag_id:
+        missing_airflow.append("loading_dag_id/NDAP_AIRFLOW_DAG_ID")
+
+    return templates.TemplateResponse("load_type.html", {
+        "request": request,
+        "active_step": 0,
+        "title": "Select Load Type",
+        "completed_steps": [],
+        "token": None,
+        "run_id": run_id,
+        "load_mode": load_mode,
+        "show_stepper": False,
+        "settings_s3_ready": s3_ready,
+        "settings_airflow_ready": airflow_ready,
+        "missing_settings_s3": missing_s3,
+        "missing_settings_airflow": missing_airflow,
+    })
+
+
+@app.post("/load-type/save")
+async def load_type_save(request: Request, load_mode: str = Form("new")):
+    if not require_login(request):
+        return RedirectResponse(url="/login", status_code=302)
+    # Enforce settings readiness on server side as well
+    s3_bucket_cfg = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
+    airflow_base = (DB.get_setting("NDAP_AIRFLOW_URL") or os.environ.get("NDAP_AIRFLOW_URL") or "").strip()
+    airflow_dag_id = (DB.get_setting("loading_dag_id") or DB.get_setting("NDAP_AIRFLOW_DAG_ID") or "").strip()
+    if (not s3_bucket_cfg) or (not airflow_base) or (not airflow_dag_id):
+        return RedirectResponse(url="/load-type", status_code=302)
+    # Start a new lifecycle token
+    token = uuid4().hex
+    run_id = _reset_run_id(request)
+    # Map mode to flags
+    mode = (load_mode or "").strip().lower()
+    inc = False; sch = False; dsc = False
+    if mode == "full_reload":
+        inc = False; sch = True; dsc = False
+    elif mode == "delta":
+        inc = True; sch = True; dsc = False
+    elif mode == "structure_change":
+        inc = False; sch = False; dsc = True
+    else:
+        inc = False; sch = False; dsc = False
+    airflow_params = {"is_incremental": inc, "schema_exists": sch, "delta_with_structure_change": dsc}
+    VALIDATION_STATE[token] = {
+        "airflow_params": airflow_params,
+        "run_id": run_id,
+    }
+    # Persist selection in session so multi-worker environments can restore it
+    request.session["airflow_params"] = airflow_params
+    request.session["load_mode"] = load_mode
+    _set_active_token(request, token)
+    # Proceed to stepper start (Upload / preview page)
+    return RedirectResponse(url="/", status_code=303)
 
 
 @app.post("/preview", response_class=HTMLResponse)
@@ -338,13 +506,48 @@ async def preview(
             in_prefix = (in_prefix or "").lstrip("/")
             if in_prefix and not in_prefix.endswith("/"):
                 in_prefix = in_prefix + "/"
+            # Always search under '<path>/pending/' for validation/preview (all modes).
+            # Avoid duplicating 'pending' and normalize to a single trailing slash.
+            p = in_prefix.rstrip("/")
+            if not p.lower().endswith("/pending") and not p.lower().endswith("pending"):
+                in_prefix = (p + "/pending/") if p else "pending/"
+            else:
+                in_prefix = p + "/"
 
             if not in_bucket:
                 raise ValueError("S3 bucket is not configured. Please set S3_BUCKET in Settings.")
 
-            all_keys = uploader.list_objects(in_bucket, in_prefix)
-            # pick first CSV-like key
-            csv_keys = [k for k in all_keys if k.lower().endswith(".csv")]
+            # List CSVs robustly: try with/without trailing slash, retry once
+            def _find_csvs(bucket: str, prefix: str) -> List[str]:
+                candidates = []
+                p = (prefix or "").lstrip("/")
+                forms = []
+                if p:
+                    # try as-given, without slash, and with slash
+                    forms = [p, p.rstrip("/"), p.rstrip("/") + "/"]
+                else:
+                    forms = [""]
+                seen = set()
+                out: List[str] = []
+                for f in forms:
+                    try:
+                        keys = uploader.list_objects(bucket, f)
+                    except Exception:
+                        keys = []
+                    for k in keys:
+                        if k in seen:
+                            continue
+                        seen.add(k)
+                        if k.lower().endswith(".csv"):
+                            out.append(k)
+                # consistent order
+                out.sort()
+                return out
+
+            csv_keys = _find_csvs(in_bucket, in_prefix)
+            if not csv_keys:
+                # quick retry once in case of transient list hiccup
+                csv_keys = _find_csvs(in_bucket, in_prefix)
             if not csv_keys:
                 raise ValueError("No CSV files found in the provided S3 folder.")
             sample_key = csv_keys[0]
@@ -478,6 +681,19 @@ async def preview_get(request: Request, token: str | None = None):
     state = VALIDATION_STATE.get(token, {})
     schema = state.get("schema", "National")
     meta = _get_meta(token)
+    # Compute source code to display for non-new modes
+    source_code_display = None
+    try:
+        if load_mode != "new":
+            if s3_folder_mode:
+                pref = (s3_folder or "").strip("/")
+                if "/pending" in pref:
+                    pref = pref.split("/pending", 1)[0]
+                source_code_display = (pref.rsplit("/", 1)[-1] if pref else None)
+            else:
+                source_code_display = ((state.get("s3_form", {}) or {}).get("folder") or None)
+    except Exception:
+        source_code_display = None
     _set_active_token(request, token)
     return templates.TemplateResponse(
         "preview.html",
@@ -822,6 +1038,19 @@ async def validate_get(request: Request, token: str | None = None):
     if meta.get("run_id") and not state.get("run_id"):
         state["run_id"] = meta.get("run_id")
     _set_active_token(request, token)
+    # derive current load mode selection
+    airflow_params = state.get("airflow_params", {}) if isinstance(state, dict) else {}
+    is_incremental = bool(airflow_params.get("is_incremental"))
+    schema_exists = bool(airflow_params.get("schema_exists"))
+    delta_with_structure_change = bool(airflow_params.get("delta_with_structure_change"))
+    if delta_with_structure_change:
+        load_mode = "structure_change"
+    elif is_incremental and schema_exists:
+        load_mode = "delta"
+    elif (not is_incremental) and schema_exists:
+        load_mode = "full_reload"
+    else:
+        load_mode = "new"
     return templates.TemplateResponse(
         "validate.html",
         {
@@ -844,6 +1073,7 @@ async def validate_get(request: Request, token: str | None = None):
             "completed_steps": _combined_steps(request, token),
             "run_id": state.get("run_id") or meta.get("run_id", ""),
             "s3_folder_mode": bool(state.get("s3_folder_info")),
+            "load_mode": load_mode,
         },
     )
 
@@ -865,6 +1095,7 @@ async def upload_get(request: Request, token: str | None = None):
         except Exception:
             snap = None
         if snap and snap.get("validated_passed"):
+            prev = VALIDATION_STATE.get(token, {}) or {}
             try:
                 cols = json.loads(snap.get("columns_json") or "[]")
             except Exception:
@@ -883,6 +1114,11 @@ async def upload_get(request: Request, token: str | None = None):
                 "failed_columns": [],
                 "run_id": (snap.get("run_id") or ""),
             }
+            # Preserve previously selected airflow params (load type)
+            if isinstance(prev, dict) and prev.get("airflow_params"):
+                state["airflow_params"] = prev.get("airflow_params")
+            elif request.session.get("airflow_params"):
+                state["airflow_params"] = request.session.get("airflow_params")
             VALIDATION_STATE[token] = state
             if token not in STEP_COMPLETION:
                 STEP_COMPLETION[token] = set()
@@ -917,6 +1153,22 @@ async def upload_get(request: Request, token: str | None = None):
     meta = _get_meta(token)
     if meta.get("run_id") and not state.get("run_id"):
         state["run_id"] = meta.get("run_id")
+    # Ensure airflow params available from session if missing
+    if not state.get("airflow_params") and request.session.get("airflow_params"):
+        state["airflow_params"] = request.session.get("airflow_params")
+    # derive current load mode selection
+    airflow_params = state.get("airflow_params", {}) if isinstance(state, dict) else {}
+    is_incremental = bool(airflow_params.get("is_incremental"))
+    schema_exists = bool(airflow_params.get("schema_exists"))
+    delta_with_structure_change = bool(airflow_params.get("delta_with_structure_change"))
+    if delta_with_structure_change:
+        load_mode = "structure_change"
+    elif is_incremental and schema_exists:
+        load_mode = "delta"
+    elif (not is_incremental) and schema_exists:
+        load_mode = "full_reload"
+    else:
+        load_mode = "new"
     return templates.TemplateResponse(
         "s3_upload.html",
         {
@@ -935,6 +1187,7 @@ async def upload_get(request: Request, token: str | None = None):
             "title": "Upload",
             "completed_steps": _combined_steps(request, token),
             "run_id": state.get("run_id") or meta.get("run_id", ""),
+            "load_mode": load_mode,
         },
     )
 
@@ -944,8 +1197,9 @@ async def upload(
     request: Request,
     token: str = Form(...),
     columns: str = Form(...),
-    object_key_name: str = Form(...),
+    object_key_name: str = Form(""),
     s3_folder_name: str | None = Form(None),
+    source_code_value: str | None = Form(None),
 ):
     if not require_login(request):
         return RedirectResponse(url="/login", status_code=302)
@@ -1045,9 +1299,31 @@ async def upload(
         # Upload the original bytes exactly as provided by user
         csv_bytes = data
 
+        # Determine effective object key and folder based on load mode selection
+        airflow_params = state.get("airflow_params", {}) if isinstance(state, dict) else {}
+        is_incremental = bool(airflow_params.get("is_incremental"))
+        schema_exists = bool(airflow_params.get("schema_exists"))
+        delta_with_structure_change = bool(airflow_params.get("delta_with_structure_change"))
+        if delta_with_structure_change:
+            eff_mode = "structure_change"
+        elif is_incremental and schema_exists:
+            eff_mode = "delta"
+        elif (not is_incremental) and schema_exists:
+            eff_mode = "full_reload"
+        else:
+            eff_mode = "new"
+
         folder_value = (s3_folder_name or "").strip()
+        eff_object_key = (object_key_name or "").strip()
+        if eff_mode != "new":
+            src = (source_code_value or "").strip()
+            if not src:
+                return _render_upload_with_error("Please provide Source Code for the selected load type.")
+            eff_object_key = f"{src}.csv"
+            folder_value = src
+
         state["s3_form"] = {
-            "object_key": object_key_name,
+            "object_key": eff_object_key,
             "folder": folder_value,
         }
         folder_prefix = folder_value
@@ -1055,7 +1331,7 @@ async def upload(
             if not folder_prefix.endswith("/"):
                 folder_prefix = folder_prefix + "/"
             folder_prefix = folder_prefix + "pending/"
-        key = f"{folder_prefix}{object_key_name}" if folder_prefix else object_key_name
+        key = f"{folder_prefix}{eff_object_key}" if folder_prefix else eff_object_key
         s3_uri = uploader.upload_bytes(
             bucket=s3_bucket,
             key=key,
@@ -1079,6 +1355,17 @@ async def upload(
         }
 
         try:
+            # Determine current load_mode for logging
+            airflow_params = state.get("airflow_params", {}) if isinstance(state, dict) else {}
+            inc = bool(airflow_params.get("is_incremental")); sch = bool(airflow_params.get("schema_exists")); dsc = bool(airflow_params.get("delta_with_structure_change"))
+            if dsc: eff_mode = "structure_change"
+            elif inc and sch: eff_mode = "delta"
+            elif (not inc) and sch: eff_mode = "full_reload"
+            else: eff_mode = "new"
+            src_code = None
+            if eff_mode != "new":
+                sc = (state.get("s3_form", {}) or {}).get("folder") or ""
+                src_code = sc or None
             DB.log_upload(
                 token,
                 get_username(request),
@@ -1088,7 +1375,10 @@ async def upload(
                 status="Success",
                 comments="Upload completed",
                 dag_status="Not triggered",
+                dag_run_id=None,
+                source_code=src_code,
                 run_id=run_id,
+                load_mode=eff_mode,
             )
         except Exception:
             pass
@@ -1167,6 +1457,11 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
         missing_settings.append("loading_dag_id/NDAP_AIRFLOW_DAG_ID")
     settings_ready = len(missing_settings) == 0
 
+    # Ensure airflow params present from session if missing
+    if (not isinstance(state, dict)) or ("airflow_params" not in state or not state.get("airflow_params")):
+        sess_params = request.session.get("airflow_params")
+        if sess_params and isinstance(state, dict):
+            state["airflow_params"] = sess_params
     airflow_params = state.get("airflow_params", {})
     is_incremental = bool(airflow_params.get("is_incremental"))
     schema_exists = bool(airflow_params.get("schema_exists"))
@@ -1183,6 +1478,28 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
         load_mode = "new"
 
     meta = _get_meta(token)
+    # Compute source code display for non-new modes
+    source_code_display = None
+    try:
+        if load_mode != "new":
+            if s3_folder_mode:
+                pref = (s3_folder or "").strip("/")
+                if "/pending" in pref:
+                    pref = pref.split("/pending", 1)[0]
+                source_code_display = (pref.rsplit("/", 1)[-1] if pref else None)
+            else:
+                source_code_display = ((state.get("s3_form", {}) or {}).get("folder") or None)
+    except Exception:
+        source_code_display = None
+    # Include existing run info if present
+    run_state = state.get("airflow_run", {}) if isinstance(state, dict) else {}
+    airflow_dag_run_id = run_state.get("dag_run_id") or None
+    airflow_embed_url = run_state.get("airflow_embed_url") or None
+    airflow_run_url = run_state.get("airflow_run_url") or None
+    # Allow query param to signal a fresh trigger (in case state is missing between workers)
+    trig_q = request.query_params.get("triggered")
+    forced_trigger = True if trig_q in ("1","true","yes") else False
+    drid_q = request.query_params.get("dag_run_id") or None
     context = {
         "request": request,
         "token": token,
@@ -1200,9 +1517,15 @@ async def airflow_trigger_get(request: Request, token: str | None = None, upload
         "active_step": 5,
         "title": "Trigger Airflow",
         "completed_steps": _combined_steps(request, token),
-        "error": None,
+        "error": state.get("airflow_error"),
         "trace": None,
         "run_id": meta.get("run_id", ""),
+        "airflow_triggered": bool(airflow_dag_run_id) or forced_trigger,
+        "source_code_display": source_code_display,
+        "airflow_dag_run_id": airflow_dag_run_id or drid_q,
+        "airflow_embed_url": airflow_embed_url,
+        "airflow_run_url": airflow_run_url,
+        "airflow_dag_id": airflow_dag_id_val,
     }
     return templates.TemplateResponse("airflow_trigger.html", context)
 
@@ -1220,7 +1543,24 @@ async def airflow_trigger_post(
         return RedirectResponse(url="/login", status_code=302)
     state = VALIDATION_STATE.get(token)
     if not state or ("s3_upload" not in state and "s3_folder_info" not in state):
-        return RedirectResponse(url=f"/upload?token={token}", status_code=302)
+        # Attempt to reconstruct minimal context to avoid bouncing back to Upload
+        rebuilt = False
+        try:
+            # If we have an upload log entry, rebuild s3_upload (handled earlier in upload_get)
+            # For S3-folder mode, try deriving from saved upload meta (sample filename as key)
+            meta_guess = _get_meta(token)
+            s3_bucket_cfg = (DB.get_setting("S3_BUCKET") or os.environ.get("S3_BUCKET") or "").strip()
+            sample_name = (meta_guess or {}).get("file_name") or ""
+            if s3_bucket_cfg and sample_name and "/" in sample_name:
+                prefix = sample_name.rpartition("/")[0]
+                if not state:
+                    state = VALIDATION_STATE.setdefault(token, {})
+                state["s3_folder_info"] = {"bucket": s3_bucket_cfg, "prefix": prefix}
+                rebuilt = True
+        except Exception:
+            pass
+        if not rebuilt:
+            return RedirectResponse(url=f"/upload?token={token}", status_code=302)
     if token not in STEP_COMPLETION:
         STEP_COMPLETION[token] = set()
     _set_active_token(request, token)
@@ -1257,6 +1597,7 @@ async def airflow_trigger_post(
     schema_bool = False
     delta_struct_bool = False
     mode = (load_mode or "").strip().lower()
+    # 1) If mode is explicitly posted, use it
     if mode in {"new", "full_reload", "delta", "structure_change"}:
         if mode == "new":
             inc_bool = False; schema_bool = False; delta_struct_bool = False
@@ -1267,9 +1608,17 @@ async def airflow_trigger_post(
         elif mode == "structure_change":
             inc_bool = False; schema_bool = False; delta_struct_bool = True
     else:
-        inc_bool = is_incremental == "on"
-        schema_bool = True if inc_bool else (schema_exists == "on")
-        delta_struct_bool = False
+        # 2) Prefer saved selection from validation/start
+        params_saved = state.get("airflow_params", {}) if isinstance(state, dict) else {}
+        if params_saved:
+            inc_bool = bool(params_saved.get("is_incremental"))
+            schema_bool = bool(params_saved.get("schema_exists"))
+            delta_struct_bool = bool(params_saved.get("delta_with_structure_change"))
+        else:
+            # 3) Fallback to legacy form toggles if posted
+            inc_bool = (is_incremental == "on")
+            schema_bool = True if inc_bool else (schema_exists == "on")
+            delta_struct_bool = False
     state["airflow_params"] = {"is_incremental": inc_bool, "schema_exists": schema_bool, "delta_with_structure_change": delta_struct_bool}
 
     airflow_base, username, password = _get_airflow_config()
@@ -1323,19 +1672,37 @@ async def airflow_trigger_post(
     pwd = password
 
     # Build conf (include delta_with_structure_change)
+    # Ensure source_code passed to Airflow does NOT include trailing '/pending'.
+    def _source_code_for_airflow(val: str, bucket: str | None = None) -> str:
+        v = (val or "").strip()
+        # Strip s3://bucket/ if accidentally present
+        if v.lower().startswith("s3://"):
+            rest = v[5:]
+            parts = rest.split("/", 1)
+            if len(parts) == 2:
+                v = parts[1]
+            else:
+                v = ""
+        # Tokenize and drop any trailing 'pending' segment(s) and empties
+        parts = [p for p in v.split('/') if p]
+        while parts and parts[-1].lower() == 'pending':
+            parts.pop()
+        v = '/'.join(parts)
+        return v
+
     if s3_folder_mode:
         # Prefer override
         src_override = (state.get("source_code_override") or "").strip() if isinstance(state, dict) else ""
         source_code_value = src_override or folder_value
         conf_obj = {
-            "source_code": source_code_value,
+            "source_code": _source_code_for_airflow(source_code_value, s3_bucket),
             "is_incremental": "yes" if inc_bool else "no",
             "schema_exist": "yes" if schema_bool else "no",
             "delta_with_structure_change": "yes" if delta_struct_bool else "no",
         }
     else:
         conf_obj = {
-            "source_code": folder_value,
+            "source_code": _source_code_for_airflow(folder_value, s3_bucket),
             "is_incremental": "yes" if inc_bool else "no",
             "schema_exist": "yes" if schema_bool else "no",
             "delta_with_structure_change": "yes" if delta_struct_bool else "no",
@@ -1361,6 +1728,19 @@ async def airflow_trigger_post(
         airflow_embed_url = f"{embed_base.rstrip('/')}{run_path}"
         STEP_COMPLETION[token].add(5)
         _add_session_step(request, 5)
+        # Determine source code for logging (non-new modes)
+        source_code_for_log = None
+        eff_mode = (mode if (load_mode and isinstance(load_mode, str)) else (load_mode or "")).lower() if (load_mode is not None) else (
+            "structure_change" if delta_struct_bool else ("delta" if (inc_bool and schema_bool) else ("full_reload" if (not inc_bool and schema_bool) else "new"))
+        )
+        if eff_mode != "new":
+            if s3_folder_mode:
+                pref = (folder_value or "").strip("/")
+                if "/pending" in pref:
+                    pref = pref.split("/pending", 1)[0]
+                source_code_for_log = (pref.rsplit("/", 1)[-1] if pref else None)
+            else:
+                source_code_for_log = ((state.get("s3_form", {}) or {}).get("folder") or None)
         try:
             DB.update_upload_airflow(
                 token,
@@ -1372,6 +1752,9 @@ async def airflow_trigger_post(
                 s3_uri=s3_uri,
                 status="Success",
                 run_id=resolved_run_id,
+                load_mode=(load_mode if 'load_mode' in locals() and load_mode else (
+                    "structure_change" if delta_struct_bool else ("delta" if (inc_bool and schema_bool) else ("full_reload" if (not inc_bool and schema_bool) else "new"))
+                )),
             )
         except Exception:
             pass
@@ -1398,31 +1781,14 @@ async def airflow_trigger_post(
             pass
         return _render_trigger_with_error(airflow_error or "Failed to trigger Airflow DAG.")
 
-    meta = _get_meta(token)
-    columns_state = state.get("columns", [])
-
-    return templates.TemplateResponse(
-        "result.html",
-        {
-            "request": request,
-            "success": True,
-            "s3_uri": s3_uri,
-            "airflow_triggered": ok,
-            "airflow_dag_id": airflow_dag_id_val,
-            "airflow_dag_run_id": airflow_dag_run_id,
-            "airflow_embed_url": airflow_embed_url,
-            "airflow_run_url": airflow_run_url,
-            "airflow_error": airflow_error,
-            "file_name": meta.get("file_name", ""),
-            "record_count": meta.get("record_count", 0),
-            "active_step": 5,
-            "title": "Trigger Airflow",
-            "token": token,
-            "columns": columns_state,
-            "completed_steps": _combined_steps(request, token),
-            "run_id": meta.get("run_id", ""),
-        },
-    )
+    # Redirect to GET view to avoid stale Step 4 header and enable live status polling
+    q = f"?token={token}"
+    if airflow_dag_run_id:
+        from urllib.parse import quote as _q
+        q += f"&triggered=1&dag_run_id={_q(str(airflow_dag_run_id))}"
+    else:
+        q += "&triggered=1"
+    return RedirectResponse(url=f"/airflow-trigger{q}", status_code=303)
 
 
 @app.get("/login", response_class=HTMLResponse)
