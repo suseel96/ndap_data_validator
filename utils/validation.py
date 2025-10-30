@@ -149,8 +149,15 @@ def _count_time_format_errors(series: pd.Series) -> int:
     patterns: List[Tuple[str, re.Pattern]] = [
         ("YYYY", re.compile(r"^\d{4}$")),
         ("YYYY-YY", re.compile(r"^\d{4}-\d{2}$")),
-        ("MMM-YYYY", re.compile(fr"^(?:{month})-\d{{4}}$", re.IGNORECASE)),
-        ("MMM-MMM, YYYY", re.compile(fr"^(?:{month})-(?:{month}),\s*\d{{4}}$", re.IGNORECASE)),
+        ("MMM-YYYY", re.compile(rf"^(?:{month})-\d{{4}}$", re.IGNORECASE)),
+        (
+            "MMM-MMM, YYYY",
+            re.compile(rf"^(?:{month})-(?:{month}),\s*\d{{4}}$", re.IGNORECASE),
+        ),
+        (
+            "MMM - MMM, YYYY",
+            re.compile(rf"^(?:{month}) - (?:{month}),\s*\d{{4}}$", re.IGNORECASE),
+        ),
     ]
     vals = series[~series.isna()].astype("string").dropna()
     invalid = 0
@@ -248,8 +255,15 @@ def validate_dataframe_by_roles(
     time_patterns: List[Tuple[str, re.Pattern]] = [
         ("YYYY", re.compile(r"^\d{4}$")),
         ("YYYY-YY", re.compile(r"^\d{4}-\d{2}$")),
-        ("MMM-YYYY", re.compile(fr"^(?:{month})-\d{{4}}$", re.IGNORECASE)),
-        ("MMM-MMM, YYYY", re.compile(fr"^(?:{month})-(?:{month}),\s*\d{{4}}$", re.IGNORECASE)),
+        ("MMM-YYYY", re.compile(rf"^(?:{month})-\d{{4}}$", re.IGNORECASE)),
+        (
+            "MMM-MMM, YYYY",
+            re.compile(rf"^(?:{month})-(?:{month}),\s*\d{{4}}$", re.IGNORECASE),
+        ),
+        (
+            "MMM - MMM, YYYY",
+            re.compile(rf"^(?:{month}) - (?:{month}),\s*\d{{4}}$", re.IGNORECASE),
+        ),
     ]
 
     for col in df.columns:
@@ -300,7 +314,9 @@ def validate_dataframe_by_roles(
 
             if invalid_count > 0:
                 passed = False
-                reasons.append("Invalid time format; allowed: 'YYYY', 'YYYY-YY', 'MMM-YYYY', 'MMM-MMM, YYYY' ")
+                reasons.append(
+                    "Invalid time format; allowed: 'YYYY', 'YYYY-YY', 'MMM-YYYY', 'MMM-MMM, YYYY', 'MMM - MMM, YYYY' "
+                )
             elif len(formats_seen) > 0:
                 first_fmt = formats_seen[0]
                 # If more than one distinct format observed, mark inconsistent
@@ -337,5 +353,3 @@ def validate_dataframe_by_roles(
         "missing_roles": missing_roles,
         "passed": overall_passed,
     }
-
-
