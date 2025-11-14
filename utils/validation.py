@@ -158,6 +158,7 @@ def _count_time_format_errors(series: pd.Series) -> int:
             "MMM - MMM, YYYY",
             re.compile(rf"^(?:{month}) - (?:{month}),\s*\d{{4}}$", re.IGNORECASE),
         ),
+        ("DD-MMM-YYYY", re.compile(fr"^(0?[1-9]|[12][0-9]|3[01])-(?:{month})-\d{{4}}$", re.IGNORECASE)),
     ]
     vals = series[~series.isna()].astype("string").dropna()
     invalid = 0
