@@ -265,6 +265,7 @@ def validate_dataframe_by_roles(
             "MMM - MMM, YYYY",
             re.compile(rf"^(?:{month}) - (?:{month}),\s*\d{{4}}$", re.IGNORECASE),
         ),
+        ("DD-MMM-YYYY", re.compile(fr"^(0?[1-9]|[12][0-9]|3[01])-(?:{month})-\d{{4}}$", re.IGNORECASE)),
     ]
 
     for col in df.columns:
