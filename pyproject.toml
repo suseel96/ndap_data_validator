@@ -22,6 +22,7 @@ dependencies = [
   "duckdb==1.0.0",
   "passlib[bcrypt]==1.7.4",
   "itsdangerous==2.2.0",
+  "requests>=2.34.0",
 ]
 
 [project.urls]

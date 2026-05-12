@@ -10,6 +10,27 @@
   {% if error %}
     <div class="alert alert-danger">{{ error }}</div>
     {% if trace %}<pre class="small">{{ trace }}</pre>{% endif %}
+    {% if debug and (debug.url or debug.status_code or debug.payload) %}
+      <div class="card border-danger mb-3">
+        <div class="card-header text-danger">Airflow Debug</div>
+        <div class="card-body small">
+          {% if debug.url %}
+            <div class="mb-2"><strong>URL:</strong> <code>{{ debug.url }}</code></div>
+          {% endif %}
+          {% if debug.status_code %}
+            <div class="mb-2"><strong>Status:</strong> <code>{{ debug.status_code }}</code></div>
+          {% endif %}
+          {% if debug.payload %}
+            <div><strong>Payload:</strong></div>
+            <pre class="mb-0"><code>{{ debug.payload | tojson(indent=2) }}</code></pre>
+          {% endif %}
+          {% if debug.attempts %}
+            <div class="mt-3"><strong>Attempt History:</strong></div>
+            <pre class="mb-0"><code>{{ debug.attempts | tojson(indent=2) }}</code></pre>
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
   {% endif %}
 
   {% if not airflow_ready %}
