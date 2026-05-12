@@ -1263,10 +1263,9 @@ async def upload_get(request: Request, token: str | None = None):
     settings_ready = len(missing_settings) == 0
 
     s3_form_defaults = state.get("s3_form") or state.get("s3_upload") or {}
-    object_key_value = s3_form_defaults.get("object_key", "")
-    s3_folder_value = s3_form_defaults.get("folder", "")
-
     meta = _get_meta(token)
+    object_key_value = s3_form_defaults.get("object_key", "") or meta.get("file_name", "")
+    s3_folder_value = s3_form_defaults.get("folder", "")
     if meta.get("run_id") and not state.get("run_id"):
         state["run_id"] = meta.get("run_id")
     # Ensure airflow params available from session if missing
@@ -1429,14 +1428,23 @@ async def upload(
         else:
             eff_mode = "new"
 
-        folder_value = (s3_folder_name or "").strip()
-        eff_object_key = (object_key_name or "").strip()
+        folder_value = (s3_folder_name or "").strip().strip("/")
+        eff_object_key = (object_key_name or "").strip().lstrip("/")
         if eff_mode != "new":
             src = (source_code_value or "").strip()
             if not src:
                 return _render_upload_with_error("Please provide Source Code for the selected load type.")
             eff_object_key = f"{src}.csv"
             folder_value = src
+        else:
+            if not eff_object_key:
+                fallback_name = str(meta.get("file_name") or "").strip()
+                if fallback_name:
+                    eff_object_key = fallback_name.rsplit("/", 1)[-1]
+            if not eff_object_key:
+                return _render_upload_with_error("Please provide the file name including extension.")
+            if not folder_value:
+                return _render_upload_with_error("Please provide the S3 folder name.")
 
         state["s3_form"] = {
             "object_key": eff_object_key,
@@ -2253,7 +2261,6 @@ async def admin_settings_save(
     except Exception:
         pass
     return RedirectResponse(url="/admin/settings?saved=1", status_code=303)
-
 
 
 
