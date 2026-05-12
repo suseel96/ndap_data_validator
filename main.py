@@ -5,6 +5,7 @@ import json
 import traceback
 from typing import Dict, List, Tuple
 import os
+from datetime import datetime, timezone
 from uuid import uuid4
 import base64
 import json as _json
@@ -14,7 +15,7 @@ import urllib.request
 import urllib.error
 
 import pandas as pd
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile, requests
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
@@ -229,22 +230,58 @@ def _get_airflow_config() -> tuple[str, str | None, str | None]:
     return base, username, password
 
 
+def _normalize_airflow_base_url(base_url: str) -> str:
+    base = (base_url or "").strip().rstrip("/")
+    return re.sub(r"/api/v[0-9]+/?$", "", base, flags=re.IGNORECASE)
+
+
+def _get_airflow_auth_headers(base_url: str, username: str | None, password: str | None) -> dict[str, str]:
+    if not username:
+        return {}
+
+    normalized_base = _normalize_airflow_base_url(base_url)
+    token_url = f"{normalized_base.rstrip('/')}/auth/token"
+    payload = _json.dumps({
+        "username": username,
+        "password": password or "",
+    }).encode("utf-8")
+    req = urllib.request.Request(url=token_url, data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8")
+            data = _json.loads(body)
+            token = data.get("access_token")
+            if token:
+                return {"Authorization": f"Bearer {token}"}
+    except Exception:
+        pass
+
+    basic = base64.b64encode(f"{username}:{password or ''}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {basic}"}
+
+
+def _decode_json_response(resp) -> dict:
+    body = resp.read().decode("utf-8")
+    try:
+        return _json.loads(body)
+    except Exception:
+        return {"raw": body}
+
+
 def _airflow_api_get_json(base_url: str, path: str, username: str | None, password: str | None, timeout: int = 10) -> tuple[bool, dict | str]:
     if not base_url:
         return False, "Airflow base URL is not configured"
-    url = f"{base_url.rstrip('/')}{path}"
+    normalized_base = _normalize_airflow_base_url(base_url)
+    url = f"{normalized_base.rstrip('/')}{path}"
     req = urllib.request.Request(url=url, method="GET")
     req.add_header("Accept", "application/json")
-    if username:
-        token = base64.b64encode(f"{username}:{password or ''}".encode("utf-8")).decode("ascii")
-        req.add_header("Authorization", f"Basic {token}")
+    for key, value in _get_airflow_auth_headers(base_url, username, password).items():
+        req.add_header(key, value)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8")
-            try:
-                return True, _json.loads(body)
-            except Exception:
-                return True, {"raw": body}
+            return True, _decode_json_response(resp)
     except urllib.error.HTTPError as e:
         try:
             detail = e.read().decode("utf-8")
@@ -253,6 +290,41 @@ def _airflow_api_get_json(base_url: str, path: str, username: str | None, passwo
         return False, f"HTTP {e.code}: {detail}"
     except Exception as exc:
         return False, str(exc)
+
+
+def _airflow_api_get_json_any(base_url: str, paths: list[str], username: str | None, password: str | None, timeout: int = 10) -> tuple[bool, dict | str]:
+    last_error: dict | str = "No Airflow API paths were provided"
+    for path in paths:
+        success, info = _airflow_api_get_json(base_url, path, username, password, timeout=timeout)
+        if success:
+            return True, info
+        last_error = info
+        error_text = str(info)
+        if "HTTP 404" not in error_text and "HTTP 405" not in error_text:
+            break
+    return False, last_error
+
+
+def _stringify_airflow_log_content(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        if "content" in value:
+            return _stringify_airflow_log_content(value.get("content"))
+        try:
+            return _json.dumps(value)
+        except Exception:
+            return str(value)
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            text = _stringify_airflow_log_content(item)
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    return str(value)
 
 
 AIRFLOW_TERMINAL_STATES = {"success", "failed", "error", "upstream_failed"}
@@ -268,24 +340,68 @@ def trigger_airflow_dag(base_url: str, dag_id: str, username: str | None = None,
         return False, {"error": "urllib not available"}
     if not base_url or not dag_id:
         return False, {"error": "Base URL and DAG ID are required"}
-    url = f"{base_url.rstrip('/')}/api/v1/dags/{dag_id}/dagRuns"
-    payload = {"conf": conf or {}}
-    data = _json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url=url, data=data, method="POST")
-    req.add_header("Content-Type", "application/json")
-    if username:
-        token = base64.b64encode(f"{username}:{password or ''}".encode("utf-8")).decode("ascii")
-        req.add_header("Authorization", f"Basic {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            body = resp.read().decode("utf-8")
+    normalized_base = _normalize_airflow_base_url(base_url)
+    auth_headers = _get_airflow_auth_headers(base_url, username, password)
+    logical_date = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    attempts = [
+        (
+            f"{normalized_base.rstrip('/')}/api/v2/dags/{dag_id}/dagRuns",
+            {
+                "conf": conf or {},
+                "logical_date": logical_date,
+            },
+        ),
+        (f"{normalized_base.rstrip('/')}/api/v1/dags/{dag_id}/dagRuns", {"conf": conf or {}}),
+        (f"{normalized_base.rstrip('/')}/api/experimental/dags/{dag_id}/dag_runs", {"conf": conf or {}}),
+    ]
+    last_error: dict[str, object] | None = None
+    attempt_results: list[dict[str, object]] = []
+
+    for url, payload in attempts:
+        data = _json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url=url, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Accept", "application/json")
+        for key, value in auth_headers.items():
+            req.add_header(key, value)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return True, _decode_json_response(resp)
+        except urllib.error.HTTPError as e:
             try:
-                j = _json.loads(body)
+                detail = e.read().decode("utf-8")
             except Exception:
-                j = {"raw": body}
-            return True, j
-    except Exception as e:
-        return False, {"error": str(e)}
+                detail = str(e)
+            attempt_results.append({
+                "url": url,
+                "status_code": e.code,
+                "payload": payload,
+                "error": detail,
+            })
+            last_error = {
+                "error": f"HTTP {e.code}: {detail}",
+                "status_code": e.code,
+                "url": url,
+                "payload": payload,
+                "attempts": attempt_results,
+            }
+            if e.code not in {404, 405, 415, 422}:
+                break
+        except Exception as e:
+            attempt_results.append({
+                "url": url,
+                "payload": payload,
+                "error": str(e),
+            })
+            last_error = {
+                "error": str(e),
+                "url": url,
+                "payload": payload,
+                "attempts": attempt_results,
+            }
+            break
+
+    return False, last_error or {"error": "Failed to trigger Airflow DAG"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1638,7 +1754,7 @@ async def airflow_trigger_post(
     if resolved_run_id and not meta.get("run_id"):
         meta["run_id"] = resolved_run_id
 
-    def _render_trigger_with_error(message: str, trace: str | None = None):
+    def _render_trigger_with_error(message: str, trace: str | None = None, debug: dict | None = None):
         refreshed_meta = _get_meta(token)
         context = {
             "request": request,
@@ -1659,6 +1775,7 @@ async def airflow_trigger_post(
             "completed_steps": _combined_steps(request, token),
             "error": message,
             "trace": trace,
+            "debug": debug or {},
             "run_id": resolved_run_id or refreshed_meta.get("run_id", ""),
             "s3_folder_mode": s3_folder_mode,
         }
@@ -1763,8 +1880,15 @@ async def airflow_trigger_post(
             "status": "Triggered",
         }
     else:
+        airflow_debug = {}
         if isinstance(info, dict):
             airflow_error = info.get("error") or info.get("message") or info.get("raw")
+            airflow_debug = {
+                "url": info.get("url") or "",
+                "status_code": info.get("status_code") or "",
+                "payload": info.get("payload") or {},
+                "attempts": info.get("attempts") or [],
+            }
         else:
             airflow_error = str(info)
         try:
@@ -1779,7 +1903,10 @@ async def airflow_trigger_post(
             )
         except Exception:
             pass
-        return _render_trigger_with_error(airflow_error or "Failed to trigger Airflow DAG.")
+        return _render_trigger_with_error(
+            airflow_error or "Failed to trigger Airflow DAG.",
+            debug=airflow_debug,
+        )
 
     # Redirect to GET view to avoid stale Step 4 header and enable live status polling
     q = f"?token={token}"
@@ -1954,7 +2081,15 @@ async def airflow_run_status(request: Request, dag_id: str, dag_run_id: str):
     base, username, password = _get_airflow_config()
     if not base:
         return JSONResponse({"error": "Airflow base URL is not configured"}, status_code=400)
-    success, dag_info = _airflow_api_get_json(base, f"/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}", username, password)
+    success, dag_info = _airflow_api_get_json_any(
+        base,
+        [
+            f"/api/v2/dags/{dag_id}/dagRuns/{dag_run_id}",
+            f"/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}",
+        ],
+        username,
+        password,
+    )
     if not success:
         return JSONResponse({"error": dag_info}, status_code=502)
     state = dag_info.get("state")
@@ -1963,8 +2098,14 @@ async def airflow_run_status(request: Request, dag_id: str, dag_run_id: str):
         "dag_run": dag_info,
         "complete": str(state or "").lower() in AIRFLOW_TERMINAL_STATES,
     }
-    tasks_success, tasks_info = _airflow_api_get_json(
-        base, f"/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances", username, password
+    tasks_success, tasks_info = _airflow_api_get_json_any(
+        base,
+        [
+            f"/api/v2/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances",
+            f"/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances",
+        ],
+        username,
+        password,
     )
     tasks: List[Dict[str, object]] = []
     source_code: str | None = None
@@ -1975,34 +2116,31 @@ async def airflow_run_status(request: Request, dag_id: str, dag_run_id: str):
             if task_id:
                 # Try to use full_content=true to fetch complete log content for the latest try
                 try_number = task.get("try_number") or 1
-                log_path = f"/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}/logs/{try_number}?full_content=true"
-                log_success, log_info = _airflow_api_get_json(
+                log_success, log_info = _airflow_api_get_json_any(
                     base,
-                    log_path,
+                    [
+                        f"/api/v2/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}/logs/{try_number}?full_content=true",
+                        f"/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}/logs/{try_number}?full_content=true",
+                    ],
                     username,
                     password,
                     timeout=30,
                 )
                 if log_success:
                     if isinstance(log_info, dict):
-                        content = log_info.get("content") or ""
+                        content = _stringify_airflow_log_content(log_info.get("content"))
                         log_snippet = content[-TASK_LOG_SNIPPET_LIMIT:]
                     elif isinstance(log_info, list):
-                        # Some Airflow versions return list of segments with 'content'
-                        parts = []
-                        for seg in log_info:
-                            if isinstance(seg, dict) and seg.get("content"):
-                                parts.append(str(seg.get("content")))
-                            elif isinstance(seg, str):
-                                parts.append(seg)
-                        content = "\n".join(parts)
+                        # Some Airflow versions return a list of log segments.
+                        content = _stringify_airflow_log_content(log_info)
                         log_snippet = content[-TASK_LOG_SNIPPET_LIMIT:]
                     elif isinstance(log_info, str):
                         log_snippet = log_info[-TASK_LOG_SNIPPET_LIMIT:]
                     else:
-                        log_snippet = "(log format unrecognized)"
+                        log_snippet = _stringify_airflow_log_content(log_info) or "(log format unrecognized)"
                 else:
-                    log_snippet = f"(log unavailable: {log_info})" if log_info else "(log unavailable)"
+                    detail = _stringify_airflow_log_content(log_info)
+                    log_snippet = f"(log unavailable: {detail})" if detail else "(log unavailable)"
                 if log_snippet and source_code is None:
                     match = re.search(r"New source code generated:\s*(\d+)", log_snippet)
                     if match:
@@ -2115,15 +2253,6 @@ async def admin_settings_save(
     except Exception:
         pass
     return RedirectResponse(url="/admin/settings?saved=1", status_code=303)
-
-
-
-
-
-
-
-
-
 
 
 
